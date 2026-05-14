@@ -40,6 +40,15 @@ export { SkillRegistry } from "./skills";
 export type { MCPToolProvider } from "./mcp";
 export { MCPRegistry } from "./mcp";
 
+// RAG types
+export type { RetrievalConfig, ToolFailure, RagBuilder, ErrorRecoveryBuilder } from "./rag-types";
+
+// Tool context types
+export type { ToolContext, ToolFactory } from "./tool-context-types";
+
+// Skill knowledge types
+export type { SkillKnowledgeEntry, AgentSkillWithKnowledge } from "./skill-types";
+
 // Service
 export type { RunAgentLoopParams } from "./service";
 export { runAgentLoop, SWITCH_ROLE_TOOL_NAME } from "./service";

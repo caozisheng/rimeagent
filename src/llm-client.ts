@@ -12,9 +12,10 @@ export function registerLLMBackend(backend: LLMBackend): void {
 
 export function resolveProvider(config: AgentLLMConfig): string {
 	if (config.provider && config.provider !== "custom") return config.provider;
-	const url = config.baseUrl.toLowerCase();
-	if (url.includes("anthropic")) return "anthropic";
-	if (url.includes("deepseek")) return "deepseek";
+	try {
+		const host = new URL(config.baseUrl).hostname;
+		if (host === "api.anthropic.com") return "anthropic";
+	} catch { /* fallback */ }
 	return "openai";
 }
 

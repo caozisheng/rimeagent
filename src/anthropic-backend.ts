@@ -66,7 +66,7 @@ function convertMessages(messages: OpenAIMessage[]): {
 					});
 				}
 			}
-			out.push({ role: "assistant", content: blocks.length === 1 && blocks[0].type === "text" ? (blocks[0].text ?? "") : blocks });
+			out.push({ role: "assistant", content: blocks.length === 0 ? [{ type: "text", text: " " }] : blocks.length === 1 && blocks[0].type === "text" ? (blocks[0].text ?? "") : blocks });
 			continue;
 		}
 
@@ -149,7 +149,7 @@ export class AnthropicLLMBackend implements LLMBackend {
 		let response: Response;
 		try {
 			if (direct) {
-				const url = config.baseUrl.replace(/\/+$/, "") + "/v1/messages";
+				const url = config.baseUrl.replace(/\/+$/, "");
 				response = await fetch(url, {
 					method: "POST",
 					headers: {
