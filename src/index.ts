@@ -21,7 +21,8 @@ export { ToolRegistry } from "./tool-registry";
 // LLM
 export type { LLMBackend } from "./llm-backend";
 export { CloudLLMBackend } from "./llm-backend";
-export { streamChatCompletion, getLLMBackend, registerLLMBackend } from "./llm-client";
+export { AnthropicLLMBackend } from "./anthropic-backend";
+export { streamChatCompletion, getLLMBackend, registerLLMBackend, resolveProvider } from "./llm-client";
 
 // Expert roles
 export type { ExpertRoleDefinition } from "./expert-roles";
