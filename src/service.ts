@@ -7,6 +7,7 @@ import type {
 	ToolDefinition,
 } from "./types";
 import { ExpertRoleRegistry } from "./expert-roles";
+import type { PromptLayer } from "./prompt-builder";
 import { buildSystemPrompt } from "./prompt-builder";
 import { streamChatCompletion } from "./llm-client";
 
@@ -22,6 +23,7 @@ export interface RunAgentLoopParams {
 	identityPrompt?: string;
 	workRules?: string;
 	tools?: ToolDefinition[];
+	customLayers?: PromptLayer[];
 	switchRoleToolDef?: ToolDefinition;
 	locale?: "zh" | "en";
 	signal?: AbortSignal;
@@ -100,6 +102,7 @@ export async function* runAgentLoop(params: RunAgentLoopParams): AsyncGenerator<
 		dynamicContext: contextSection,
 		ragContext: ragContext ?? undefined,
 		workRules,
+		customLayers: params.customLayers,
 	});
 
 	const switchRoleDef = isOrchestrator
