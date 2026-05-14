@@ -149,7 +149,7 @@ export class AnthropicLLMBackend implements LLMBackend {
 		let response: Response;
 		try {
 			if (direct) {
-				const url = config.baseUrl.replace(/\/+$/, "");
+				const url = config.baseUrl.replace(/\/+$/, "") + "/v1/messages";
 				response = await fetch(url, {
 					method: "POST",
 					headers: {
