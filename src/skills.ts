@@ -11,30 +11,43 @@ export interface AgentSkill {
 	onDeactivate?: () => void | Promise<void>;
 }
 
-const skills = new Map<string, AgentSkill>();
+export interface SkillRegistryInstance {
+	register(skill: AgentSkill): void;
+	get(id: string): AgentSkill | undefined;
+	getAll(): AgentSkill[];
+	getAllTools(): AgentTool[];
+	getAllPromptLayers(): PromptLayer[];
+	clear(): void;
+}
 
-export const SkillRegistry = {
-	register(skill: AgentSkill): void {
-		skills.set(skill.id, skill);
-	},
+export function createSkillRegistry(): SkillRegistryInstance {
+	const skills = new Map<string, AgentSkill>();
 
-	get(id: string): AgentSkill | undefined {
-		return skills.get(id);
-	},
+	return {
+		register(skill: AgentSkill): void {
+			skills.set(skill.id, skill);
+		},
 
-	getAll(): AgentSkill[] {
-		return Array.from(skills.values());
-	},
+		get(id: string): AgentSkill | undefined {
+			return skills.get(id);
+		},
 
-	getAllTools(): AgentTool[] {
-		return Array.from(skills.values()).flatMap((s) => s.tools ?? []);
-	},
+		getAll(): AgentSkill[] {
+			return Array.from(skills.values());
+		},
 
-	getAllPromptLayers(): PromptLayer[] {
-		return Array.from(skills.values()).flatMap((s) => s.promptLayers ?? []);
-	},
+		getAllTools(): AgentTool[] {
+			return Array.from(skills.values()).flatMap((s) => s.tools ?? []);
+		},
 
-	clear(): void {
-		skills.clear();
-	},
-};
+		getAllPromptLayers(): PromptLayer[] {
+			return Array.from(skills.values()).flatMap((s) => s.promptLayers ?? []);
+		},
+
+		clear(): void {
+			skills.clear();
+		},
+	};
+}
+
+export const SkillRegistry = createSkillRegistry();

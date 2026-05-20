@@ -10,15 +10,16 @@ export interface LLMBackend {
 	): AsyncGenerator<StreamChunk>;
 }
 
+export function shouldUseDirect(config: AgentLLMConfig): boolean {
+	if (config.directMode !== undefined) return config.directMode;
+	if (typeof window === "undefined") return false;
+	return !!(window as unknown as Record<string, unknown>).__TAURI__ ||
+		navigator.userAgent.includes("wv") ||
+		typeof (window as unknown as Record<string, unknown>).__CAPACITOR__ !== "undefined";
+}
+
 export class CloudLLMBackend implements LLMBackend {
 	type = "cloud" as const;
-
-	private shouldUseDirect(): boolean {
-		if (typeof window === "undefined") return false;
-		return !!(window as unknown as Record<string, unknown>).__TAURI__ ||
-			navigator.userAgent.includes("wv") ||
-			typeof (window as unknown as Record<string, unknown>).__CAPACITOR__ !== "undefined";
-	}
 
 	async *streamChat(
 		config: AgentLLMConfig,
@@ -26,7 +27,7 @@ export class CloudLLMBackend implements LLMBackend {
 		signal?: AbortSignal,
 		tools?: ToolDefinition[],
 	): AsyncGenerator<StreamChunk> {
-		const direct = this.shouldUseDirect();
+		const direct = shouldUseDirect(config);
 		const url = direct
 			? config.baseUrl.replace(/\/+$/, "") + "/chat/completions"
 			: "/api/ai/chat";

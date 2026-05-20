@@ -8,40 +8,53 @@ export interface MCPToolProvider {
 	dispose?(): void | Promise<void>;
 }
 
-const providers = new Map<string, MCPToolProvider>();
+export interface MCPRegistryInstance {
+	register(provider: MCPToolProvider): void;
+	get(id: string): MCPToolProvider | undefined;
+	getAll(): MCPToolProvider[];
+	getAllTools(): Promise<AgentTool[]>;
+	dispose(id: string): Promise<void>;
+	clear(): Promise<void>;
+}
 
-export const MCPRegistry = {
-	register(provider: MCPToolProvider): void {
-		providers.set(provider.id, provider);
-	},
+export function createMCPRegistry(): MCPRegistryInstance {
+	const providers = new Map<string, MCPToolProvider>();
 
-	get(id: string): MCPToolProvider | undefined {
-		return providers.get(id);
-	},
+	return {
+		register(provider: MCPToolProvider): void {
+			providers.set(provider.id, provider);
+		},
 
-	getAll(): MCPToolProvider[] {
-		return Array.from(providers.values());
-	},
+		get(id: string): MCPToolProvider | undefined {
+			return providers.get(id);
+		},
 
-	async getAllTools(): Promise<AgentTool[]> {
-		const results: AgentTool[] = [];
-		for (const provider of providers.values()) {
-			const tools = await provider.listTools();
-			results.push(...tools);
-		}
-		return results;
-	},
+		getAll(): MCPToolProvider[] {
+			return Array.from(providers.values());
+		},
 
-	async dispose(id: string): Promise<void> {
-		const provider = providers.get(id);
-		if (provider?.dispose) await provider.dispose();
-		providers.delete(id);
-	},
+		async getAllTools(): Promise<AgentTool[]> {
+			const results: AgentTool[] = [];
+			for (const provider of providers.values()) {
+				const tools = await provider.listTools();
+				results.push(...tools);
+			}
+			return results;
+		},
 
-	async clear(): Promise<void> {
-		for (const provider of providers.values()) {
-			if (provider.dispose) await provider.dispose();
-		}
-		providers.clear();
-	},
-};
+		async dispose(id: string): Promise<void> {
+			const provider = providers.get(id);
+			if (provider?.dispose) await provider.dispose();
+			providers.delete(id);
+		},
+
+		async clear(): Promise<void> {
+			for (const provider of providers.values()) {
+				if (provider.dispose) await provider.dispose();
+			}
+			providers.clear();
+		},
+	};
+}
+
+export const MCPRegistry = createMCPRegistry();
