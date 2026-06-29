@@ -5,6 +5,8 @@ export interface AgentSkill {
 	id: string;
 	name: string;
 	description: string;
+	/** Tool names this skill semantically owns (declared, not registered here). */
+	toolRefs?: string[];
 	tools?: AgentTool[];
 	promptLayers?: PromptLayer[];
 	onActivate?: () => void | Promise<void>;
