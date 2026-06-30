@@ -1,6 +1,6 @@
 {
   "name": "rimeagent",
-  "version": "0.2.3",
+  "version": "0.1.0",
   "private": false,
   "description": "Host-agnostic LLM agent engine with tool registry, streaming, and expert role orchestration",
   "type": "module",
