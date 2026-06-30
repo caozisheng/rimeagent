@@ -1,5 +1,5 @@
 {
-  "name": "@rime/agent-engine",
+  "name": "rimeagent",
   "version": "0.1.0",
   "private": false,
   "description": "Host-agnostic LLM agent engine with tool registry, streaming, and expert role orchestration",
@@ -21,7 +21,8 @@
     "build": "tsc --project tsconfig.json",
     "dev": "tsc --watch --project tsconfig.json",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "bun test"
   },
   "dependencies": {
     "nanoid": "^5.1.5"
@@ -29,6 +30,16 @@
   "devDependencies": {
     "typescript": "^5.8.3"
   },
-  "keywords": ["llm", "agent", "tool-calling", "streaming", "openai-compatible"],
-  "license": "MIT"
+  "keywords": [
+    "llm",
+    "agent",
+    "tool-calling",
+    "streaming",
+    "openai-compatible"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/caozisheng/rimeagent.git"
+  }
 }
