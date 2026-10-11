@@ -1,5 +1,5 @@
 export type { AgentStatus, AgentLLMConfig, AgentMessage, AgentEvent, TokenUsage, ToolDefinition, ToolCall, ToolResultSummary, StreamChunk, OpenAIMessage, LLMProvider, } from "./types";
-export type { AgentTool, AgentToolResult, ToolSuggestion } from "./tool-types";
+export type { AgentTool, AgentToolAnnotations, AgentToolResult, ToolSuggestion } from "./tool-types";
 export { agentToolToDefinition } from "./tool-types";
 export type { ToolRegistryInstance } from "./tool-registry";
 export { ToolRegistry, createToolRegistry } from "./tool-registry";
@@ -24,4 +24,20 @@ export type { RunAgentLoopParams } from "./service";
 export { runAgentLoop, SWITCH_ROLE_TOOL_NAME } from "./service";
 export type { AgentSessionConfig, AgentSessionParams, AgentSessionEvent, ToolFailureRecord } from "./session";
 export { runAgentSession } from "./session";
+export { AGENT_RUNTIME_EVENT_VERSION, createAgentRuntimeEvent, parseAgentRuntimeEvent } from "./events";
+export type { AgentRuntimeEvent, AgentRuntimeEventPayload, AgentRuntimeEventEnvelope } from "./events";
+export { isAgentSessionEntry, serializeAgentSessionEntry, parseAgentSessionEntry } from "./store/entries";
+export type { AgentSessionEntry, AgentSessionSnapshot } from "./store/entries";
+export { InMemorySessionStore } from "./store/session-store";
+export type { AgentSessionStore } from "./store/session-store";
+export { computeContextDigest } from "./store/checkpoint";
+export type { AgentCheckpoint, AgentCheckpointRef, AgentBranch } from "./store/checkpoint";
+export { InMemoryArtifactStore } from "./store/artifact-store";
+export type { AgentArtifact, AgentArtifactStore } from "./store/artifact-store";
+export type { JsonValue } from "./store/json";
+export { InMemoryLedger } from "./runtime/ledger";
+export type { ApprovalDecision, LedgerRecord, RuntimeLedger } from "./runtime/ledger";
+export type { ContextManagerConfig, ContextProjection, ProjectFactsDigest } from "./runtime/context-manager";
+export { createAgentRuntime } from "./runtime/runtime";
+export type { AgentRuntime, AgentRuntimeConfig, AgentRuntimeState } from "./runtime/runtime";
 //# sourceMappingURL=index.d.ts.map

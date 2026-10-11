@@ -10,11 +10,19 @@ export interface AgentToolResult {
     undoable?: boolean;
     suggestions?: ToolSuggestion[];
 }
+export interface AgentToolAnnotations {
+    readonly readOnly?: boolean;
+    readonly destructive?: boolean;
+    readonly idempotent?: boolean;
+    readonly requiresApproval?: boolean;
+    readonly executionMode?: "serial" | "parallel";
+}
 export interface AgentTool {
     name: string;
     description: string;
     parameters: Record<string, unknown>;
     requiresConfirmation?: boolean;
+    annotations?: AgentToolAnnotations;
     execute: (args: Record<string, unknown>) => Promise<AgentToolResult>;
 }
 export declare function agentToolToDefinition(tool: AgentTool): ToolDefinition;

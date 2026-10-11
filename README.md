@@ -59,7 +59,7 @@ for await (const event of events) {
 The default `RimeAgentBackend` selects OpenAI-compatible transport or native
 Anthropic transport for `api.anthropic.com`. Third-party Claude proxies remain
 OpenAI-compatible. `runAgentLoop` and `runAgentSession` retain their existing
-contracts; durable sessions, checkpoints and approvals are not implemented yet.
+contracts; durable run execution, recovery and approvals are not implemented yet.
 
 Vercel AI SDK is an optional peer, imported only through `rimeagent/backends/vercel`.
 The host supplies a model resolver and owns provider packages, credentials and
@@ -105,6 +105,125 @@ with the host's tool execution layer.
 Migration: direct imports of `CloudLLMBackend` or `AnthropicLLMBackend` must use
 `RimeAgentBackend`; the old class names are removed, not aliased. No native
 backend or Tauri dependency is included.
+
+## Runner contracts (0.4.0)
+
+The main entry exports functional in-memory session, artifact and ledger stores,
+checkpoint/digest helpers, and versioned event/entry serialization contracts.
+The stores and serialization helpers remain available independently. Runtime
+0.5.0 now uses session history and checkpoints during runs; disk adapters and
+cross-process recovery remain later phases. The legacy session wrapper uses an
+isolated in-memory runtime while retaining its original event and callback API.
+
+```typescript
+import {
+  InMemorySessionStore,
+  createAgentRuntimeEvent,
+  parseAgentRuntimeEvent,
+} from "rimeagent";
+
+const store = new InMemorySessionStore();
+await store.append("session", {
+  kind: "user_message", id: "entry-1", ts: 0, content: "Edit this clip",
+});
+
+const event = createAgentRuntimeEvent("run", 1, 0, {
+  kind: "run_started", sessionId: "session",
+});
+const decoded = parseAgentRuntimeEvent(JSON.parse(JSON.stringify(event)));
+if (decoded?.type === "run_started") {
+  console.log(decoded.payload.sessionId);
+}
+```
+
+- `InMemorySessionStore`: `load`, `append`, `saveCheckpoint`, `listCheckpoints`.
+  Entry IDs are unique per session; returned snapshots and input records are
+  isolated. Checkpoint IDs are globally unique and immutable; boundaries cannot
+  exceed appended history. Parents must exist in the same session at an earlier
+  or equal boundary. A root checkpoint at boundary 0 can create an empty session.
+- `InMemoryArtifactStore`: `put({ artifactId, sessionId, contentType, value })`,
+  `get(artifactId)`, `list(sessionId)`. Values are strict JSON data, not media
+  bytes. Global artifact IDs cannot be overwritten.
+- `InMemoryLedger`: `append`, `query(runId)`, `hasExecuted(toolCallId)`. Positive
+  safe-integer sequences strictly increase per run (gaps allowed). Only successful
+  tool executions mark the global replay query; this is not an executor lock or
+  automatic replay protection on its own.
+- `serializeAgentSessionEntry` / `parseAgentSessionEntry` validate all 16 kinds
+  and nested typed fields. Serializing live errors removes opaque `cause`;
+  parsing persisted causes or unknown kinds/fields rejects. Host code must still
+  keep secrets out of prompt/result text and arbitrary tool data.
+- `createAgentRuntimeEvent(runId, seq, ts, payload)` takes an explicit clock and
+  sequence. `parseAgentRuntimeEvent` returns `null` for unknown v2 types, throws
+  for unsupported versions or damaged known events, and supports outer `type`
+  narrowing. Event error causes are sanitized too.
+- `computeContextDigest(messages)` hashes canonical model-visible fields with
+  UTF-8 FNV-1a32; UI IDs/timestamps/results are ignored. It is not a cryptographic
+  integrity mechanism, and branching never restores a host project.
+- `AgentTool.annotations` carries read-only/destructive/idempotent/approval and
+  serial/parallel metadata without entering the LLM schema. Scheduling and
+  approval enforcement remain later phases.
+
+The memory stores are volatile. They do not claim persistence across process
+restarts or recovery of an interrupted run. Context types and
+`ProjectFactsDigest.producedBy: "host"` are frozen; there is no compaction engine
+yet. The reusable `./contract` suite will be published in its later design phase.
+
+## Agent runtime (0.5.0)
+
+```typescript
+import { createAgentRuntime, InMemorySessionStore } from "rimeagent";
+
+const runtime = createAgentRuntime({
+  sessionId: "editing-session",
+  sessionStore: new InMemorySessionStore(),
+  llmConfig: { baseUrl, apiKey, model },
+  expertRoleId: "general",
+  tools: myTools,
+  maxIterations: 10,
+  hooks: {
+    buildDynamicContext: () => currentTimelineSummary(),
+  },
+});
+
+for await (const event of runtime.run("Trim the first clip")) {
+  if (event.type === "text_delta") console.log(event.payload.content);
+  if (event.type === "run_completed") {
+    console.log(event.payload.reason, event.payload.iterations);
+  }
+}
+
+const checkpoint = await runtime.checkpoint("after trim");
+```
+
+Each run has an independent ID and increasing sequence. The same runtime instance
+rejects overlapping runs. `state` exposes idle/running/interrupted/settled;
+`abort(reason?)`, a caller AbortSignal, or closing the generator interrupts the
+run. An already-started host tool cannot be forcibly stopped: the runtime waits
+for its result, records it, then stops without starting the next tool or request.
+Providers must honor the supplied AbortSignal, and host tools must eventually
+settle. Keep consuming or close the generator to let lifecycle cleanup finish.
+
+Confirmed history and run terminal entries are written to the injected store;
+each completed iteration receives a checkpoint. Write failures reject the
+caller. `run_completed` reports `reason: "response" | "max_iterations"` and
+`iterations`, including zero when no iterations are requested. `checkpoint(label?)`
+records optional label metadata without altering the context digest.
+
+`initialMessages` can seed an empty session; tool messages must contain serialized
+`AgentToolResult` JSON plus a toolCallId. Existing history wins on later runs.
+Prompt, locale, initial active role and role-switch tool definition are supported.
+Hooks provide dynamic/RAG/error-recovery context and optional model changes on
+role switching. `runAgentLoop()` remains the unchanged single-turn API.
+
+This version is not crash-recoverable. There is no `resume()` or
+`resolveApproval()` placeholder; those methods arrive with their real features.
+If an interrupted batch still has unresolved tool calls, a fresh run in the same
+session fails explicitly before requesting the model. History is not silently
+dropped; use a new session until durable recovery is implemented.
+New runtime tools marked destructive/requiresApproval/requiresConfirmation return
+a failure before execution; the existing session callback policy is untouched.
+Tool scheduling is serial. Compaction, output/artifact budgets, persistent ledger
+replay enforcement and durable adapters are not yet wired into execution.
 
 ## Development
 

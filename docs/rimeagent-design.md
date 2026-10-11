@@ -2,7 +2,7 @@
 
 > **Status**: Accepted — 2026-10-08 · Rev3 2026-10-11（排期重排：VercelAIBackend 前置 Phase 1；runner 顺延 Phase 2–6；NativeLLMBackend 移出排期转附录 C）
 > **基线**: rimeagent `v0.1.0` @ `f30d9cb`（17 文件 / 1,398 行，源码核对）
-> **实施进度（2026-10-11）**：Phase 0 + Phase 1 引擎侧已实施，包版本准备为 `0.3.0`（未发布、未打 tag）。`bun test` 100 项通过，`bun run typecheck` 与 `npm run build` 通过；本地真实 HTTP/SSE 冒烟覆盖基线及 AI SDK 5.0.273 / 6.0.303 / 7.0.137 的文本、工具调用、usage，额外验证提前关闭 generator 取消 HTTP 响应和截断工具参数返回 tool_failure。隔离环境未安装 `ai` 时核心编译、包主入口 import 与浏览器 bundle 通过。Phase 2–8 未实施；NativeLLMBackend 明确不做。宿主 re-pin 与真实编辑任务验收未执行。
+> **实施进度（2026-10-11）**：Phase 0/1 已提交 `394ee50` 并合入远端；Phase 2 契约 + Phase 3 循环下沉已实施，包版本准备为 `0.5.0`（未发布、未打 tag）。`bun test` 300 项通过，`bun run typecheck` / `npm run build` 通过；真实本地 HTTP/SSE runtime 冒烟覆盖工具调用→串行宿主执行→模型后续回答→history/checkpoint/终态，提前关闭流观察到 HTTP 取消与 run_interrupted 落 store；兼容回调 Date/扩展 metadata/取消同时抛错、完成消息提前关闭、存储失败和 provider cleanup 失败均有行为回归。Phase 4–8 尚未实施，不具备跨进程 resume/compaction/完整审批；NativeLLMBackend 明确不做。clean-room 记录与审计清单已完成，宿主负责人签字待补；未更改宿主 pin 或代验真实编辑任务。
 > **上游决策**:
 > - `rimecut-public/docs/rimecut-feature-dev-rimeagent-design.md` §12（Durable Agent Runtime 决策版，2026-10-08）
 > - `rimecut-public/docs/rimecut-cli-for-agent.md` v3（§D5/D6：内置 agent 快路径、harness 方法、parity 已验收项）
@@ -96,6 +96,10 @@ RimeCut 宿主现状（上游文档 §3.3/§9）：`agent-store` **直接消费�
 3. **许可与依赖预算**：MIT 保持；runtime 依赖维持 `nanoid` 一个（tokenizer / IndexedDB / Vercel AI SDK 全部走注入或可选子路径导出，见 §4.3）。
 4. **消费面兼容**：`runAgentLoop` / `runAgentSession` / 全部现有导出在 1.0.0 前不删不改语义；RimeCut 按 Phase 逐个 pin commit 切换，不允许 big-bang。
 5. **原生传输边界**：`./backends/native` 只实现 `LLMBackend` 并遵守 §5.11 wire 契约与硬边界；主入口零 Tauri 依赖（peer 注入），错误/usage 映射到本仓冻结类型，不自带重试、循环或事件协议。
+
+Phase 2 clean-room 记录（2026-10-11）：实现输入仅为本仓设计式样、现有 MIT 代码及公开 TypeScript/JSON/FNV-1a 契约；本阶段未读取或复制 OpenChatCut/Pi/LangGraph 等 runner 的实现源码，也未引入相应依赖。`npm ls --omit=dev --omit=optional --depth=0` 显示核心生产依赖仅 `nanoid@5.1.16`；`ai` 仍为可选 peer。此记录不是法律结论或发布审计签字。
+
+发布前审计清单：核对完整依赖树及许可证（含可选/开发依赖）；核对新增源文件来源及外部片段引用；检查主入口没有 SDK/DOM/Tauri 适配器运行时依赖；验证 ledger/store 未新增 credential/media 字节字段；归档 Phase 8.3 审计报告。**宿主负责人 review/sign-off：待签署，不由自动化代签。**
 
 ---
 
@@ -684,6 +688,20 @@ Phase 2 的 runner 契约冻结与 Phase 3 的循环行为等价是后续一切�
 
 **Phase 2 出口**：runner 全部新类型进 `index.ts` 导出；现有导出零变化；`bun test` + `npm run build` 绿。
 
+**实施状态**：引擎侧代码、导出和内存实现已完成；现有 transport/loop/session 保持不变，新源码单文件 ≤400 行。`0.4.0` 的 store 为内存存储，提供边界校验、原子重复拒绝和输入/输出隔离，不声称断电恢复。clean-room 记录见 §3.3，签字不由自动化代替。`./contract` 套件仍归 Phase 7.3，不在 Phase 2 提前暴露。
+
+Phase 2 实施冻结补充（2026-10-11）：
+
+- `AgentSessionSnapshot = { sessionId, entries }`，返回独立快照；entry 顺序即 append 序号（首条为 1），空会话边界为 0。`load()` 对未存在 session 返回 null。entry id 在同一 session 唯一；跨 session 可复用。`serializeAgentSessionEntry()` / `parseAgentSessionEntry()` 校验所有 kind 与嵌套结构，拒绝未知 kind/字段和非 JSON 值；持久化 error 仅保存 category/message/retryable，显式移除任意 cause，避免把 SDK 请求凭据写入日志。
+- 内存 store 的入参/返回值均隔离，调用者修改不得篡改已追加历史。checkpoint id 全局唯一、不可覆盖；`entrySeq` 必须位于当前 session 已追加范围内，parent 必须已存在、同 session 且边界不大于 child。`AgentBranch = { branchId, sessionId, fromCheckpointId }` 仅表示 agent 分支，不操作项目。
+- `computeContextDigest(messages)` 对模型可见 role/content/toolCalls/toolCallId 的 canonical JSON（对象键排序、数组保序）做 UTF-8 FNV-1a 32 位摘要，输出 8 位小写十六进制。忽略 UI id/createdAt/toolResults/commandCheckpoint，不作为加密或安全完整性证明。
+- artifact 契约：`put({ artifactId, sessionId, contentType, value })` / `get(artifactId)` / `list(sessionId)`；id 全局唯一不可覆盖，value 为 JSON 数据（不得媒体字节）。宿主负责清除文本/工具数据中的秘密，本仓不承诺语义级内容检测或脱敏。
+- ledger 的 `(runId, seq)` 唯一，seq 为正安全整数、各 run 严格递增（允许间隙、不同 run 可交错）。`hasExecuted(toolCallId)` 仅成功 tool_exec 为 true；失败/retry 不标记成功。记录允许列表字段、拒绝额外敏感 payload；append/query 均独立副本。审批 decision 为 allow/deny/suspend；无原始参数、prompt、API key 字段。
+- 事件信封 `type` 与 payload 的 kind（runtime）/type（legacy）一致，联合类型按外层 type 可收窄；`createAgentRuntimeEvent()` 显式接收 runId/seq/ts，无隐式时钟或序号状态。`parseAgentRuntimeEvent()` 对版本/信封/已知 payload 校验，未知 type 返回 null（安全忽略），未知版本或已知事件损坏抛错；不引入 runner 状态机。
+- `ProjectFactsDigest` / `ContextManagerConfig` / `ContextProjection` 本阶段仅冻结类型，不导出空实现或提前实现 compaction。`./contract` 可复用套件按 Phase 7.3 发布，本阶段不暴露测试专用子路径。
+- Phase 2 实施明确：无历史 session 的 root checkpoint（无 parent、entrySeq=0）可以建立空 session；非零边界或不存在 parent 拒绝且不写入。事件工厂同 entry serializer 一样去掉 run_failed.error.cause，使事件可安全 JSON 传输；解析外部 JSON 的已知持久化 error 不允许 cause 字段。未知 type 只按信封校验后忽略，不检查扩展 payload。
+
+
 ### 7.4 Phase 3：循环下沉（2.5 周 → v0.5.0）
 
 | 任务 | 文件 | 要点 | 验收 |
@@ -695,6 +713,23 @@ Phase 2 的 runner 契约冻结与 Phase 3 的循环行为等价是后续一切�
 | 3.5 maxIterations 可观察 | `src/runtime/runtime.ts` | 达上限 → `run_completed` + 明确 payload 标记（非静默 return，修 session.ts:100 的早退） | 事件断言：iteration 计数可见 |
 
 **Phase 3 出口**：宿主可开始灰度切换 `agent-store` → `createAgentRuntime`（rimecut 仓任务，行为等价验收在上游）。
+
+**实施状态**：`createAgentRuntime()` 与唯一迭代内核已完成，session 兼容桥不再持有第二循环；生命周期/确认 history/iteration checkpoint 写入注入 store，maxIterations 有显式原因。`runAgentLoop` 不改现有单轮语义。实际模型传输冒烟已覆盖串行工具往返和取消；宿主灰度切换/parity 验收仍由 rimecut 仓执行。后续阶段 API 按下述 staged 契约增加，不发布假 resume/approval 占位。
+
+Phase 3 实施冻结补充（2026-10-11）：
+
+- `0.5.0` 新增可执行 `createAgentRuntime()`，本阶段公开 `run(userMessage, signal?)` / `checkpoint(label?)` / `abort(reason?)` / 只读 `state`（idle/running/interrupted/settled）。§5.4 的 `resume` 与 `resolveApproval` 分别在 Phase 4 / Phase 6 增加，不导出抛未实现错误的占位方法；awaiting_approval 状态随真实审批通道引入。`runAgentLoop` 保持单轮实现；共享迭代内核由 runtime 唯一持有，`runAgentSession` 通过内存 runtime 桥接，不保留第二循环。
+- 新 runtime config 实施本阶段有效字段：sessionId/llmConfig/expertRoleId/sessionStore/tools/maxIterations（缺省10）、prompt/locale 与 hooks（dynamicContext/RAG/errorRecovery/roleSwitch），可选 initialMessages/activeRoleId/switchRoleToolDef 用于宿主初始历史。context budget/artifact/executor/approval 配置与相应真实功能一同加入，不接受无效或被忽略的开关。本阶段工具严格串行；带 destructive/requiresApproval/旧 requiresConfirmation 的工具在调用前返回明确 tool_failure（不产生副作用），直到 Phase 6 可走 suspend/resume；兼容 session 的既有 onToolCall 回调语义不变。
+- 每个 run 使用独立 id 与从1递增 seq，runtime 同实例禁止重入；生成器真正开始才占用运行状态。生命周期与 assistant/tool history 追加到 SessionStore，在每个完成 iteration 保存 checkpoint；新的 run 读取会话投影，不能以分支自动回滚项目。run_completed payload additive 增可选 `reason: "response" | "max_iterations"`、`iterations`；达上限显式标记，不静默结束。entry run_completed 同步增加可选 reason/iterations。旧 AgentEvent/AgentSessionEvent 形状不改。
+- 取消必须中止 provider signal；运行中的工具承诺不伪装可强杀：等待已开始的宿主工具完成并记录结果，不再开始下一工具/模型调用，然后保存 checkpoint + run_interrupted。消费者提前关闭 generator 通过 finally 同样终结状态并写入中断记录，不在 finally yield。pre-aborted run 不请求模型/工具，也写入中断终态。存储写入失败向调用者抛出，不伪造已持久化事件；内存锁在 finally 释放。
+- 兼容包装支持已有 messages（不重加 user）、tools definitions/onToolCall、role override、静态 dynamic/RAG 与 onIterationFailures；保持既有事件顺序及同一 tool 调用序列。旧 onToolCall/onRoleSwitch/onIterationFailures 抛错仍向调用者抛出，runtime 新入口则落 run_failed。新 runtime 工具执行使用本仓已有 ToolRegistry 的 JSON/未知工具/执行兜底，不引入 schema 校验器或工具线程。
+- 本阶段 checkpoint 保存的是已确认消息投影；若在 provider partial 或未完成 tool batch 中断，不声称可恢复或 exactly-once。跨进程恢复、project revision 校验、执行 ledger 和审批恢复仍归 Phase 4/6，不以本阶段 checkpoint 冒充。
+
+- `checkpoint(label?)` 的 label 落在 additive `AgentCheckpoint.label?: string` 元数据，不混入 contextDigest；完成原因字段保持可选，旧序列化事件/entries 不要求新增字段。
+- 确认消息先落 store 再发对应 message_end/tool_result/role_switch；消费者在 message_end 提前关闭也保留已确认 assistant。模型输出 partial text 尚未完成时仍不伪装 confirmed history。
+- 兼容桥是进程内的 v2 外壳，不把旧回调值经过严格 JSON event parser 后才交回宿主：Date 等原先可 JSON.stringify 的 data 保留原值并按旧时机 yield，随后序列化模型历史。新 public runtime 事件仍满足严格可传输契约；旧回调异常即使同时发生取消也必须向调用者抛出。
+- 新 run 在读取会话后检查 tool turn 是否闭合；已中断且未全部写入结果的 batch 返回结构化 tool_failure，不向 provider 发送缺失 tool result 的消息、不默默丢弃历史。Phase 4 恢复能力到来前宿主需显式新建 session；兼容桥的模型历史由共享内核保持完整原始 JSON，私有内存日志只保存工具结果 summary，避免 sealed store schema 缩窄旧回调的扩展元数据契约。
+- 存储失败传播与取消区分：写失败后不落伪造的 run_interrupted；若 run 已启动且存储还能接收，尝试记录 run_failed，但原写错误仍抛给调用者（记录亦失败时 AggregateError 保留两者），不发假成功/持久化事件。消费者提前关闭时即使 provider cleanup 抛错，仍尝试落中断边界，cleanup 错误不被吞掉。
 
 ### 7.5 Phase 4：持久化与恢复（3 周 → v0.6.0）
 
@@ -841,23 +876,26 @@ export type { AgentErrorCategory, NormalizedError } from "./errors";
 export { normalizeError } from "./errors";
 
 // Phase 2 新增（v0.4.0 · runner 契约冻结）
-export { AGENT_RUNTIME_EVENT_VERSION } from "./events";
-export type { AgentRuntimeEvent, AgentRuntimeEventEnvelope } from "./events";
+export { AGENT_RUNTIME_EVENT_VERSION, createAgentRuntimeEvent, parseAgentRuntimeEvent } from "./events";
+export type { AgentRuntimeEvent, AgentRuntimeEventPayload, AgentRuntimeEventEnvelope } from "./events";
 export type { AgentSessionEntry, AgentSessionSnapshot } from "./store/entries";
+export { isAgentSessionEntry, serializeAgentSessionEntry, parseAgentSessionEntry } from "./store/entries";
 export type { AgentSessionStore } from "./store/session-store";
 export { InMemorySessionStore } from "./store/session-store";
 export type { AgentCheckpoint, AgentCheckpointRef, AgentBranch } from "./store/checkpoint";
 export { computeContextDigest } from "./store/checkpoint";
-export type { AgentArtifactStore } from "./store/artifact-store";
+export type { AgentArtifact, AgentArtifactStore } from "./store/artifact-store";
 export { InMemoryArtifactStore } from "./store/artifact-store";
 export type { AgentToolAnnotations } from "./tool-types";        // 挂在 AgentTool 上（Phase 2.4）
-export type { LedgerRecord, RuntimeLedger } from "./runtime/ledger";
+export type { ApprovalDecision, LedgerRecord, RuntimeLedger } from "./runtime/ledger";
 export { InMemoryLedger } from "./runtime/ledger";
+export type { JsonValue } from "./store/json";
+export type { ContextManagerConfig, ContextProjection, ProjectFactsDigest } from "./runtime/context-manager";
 
 // Phase 3+ 新增（v0.5.0 起 · runtime 主入口）
-export type { AgentRuntimeConfig, AgentRuntime } from "./runtime/runtime";
+export type { AgentRuntimeConfig, AgentRuntime, AgentRuntimeState } from "./runtime/runtime";
 export { createAgentRuntime } from "./runtime/runtime";
-export type { ContextManagerConfig, ContextProjection, ProjectFactsDigest } from "./runtime/context-manager";
+// Phase 4/6: actual execution/approval strategies add their APIs when implemented.
 export type { ToolExecutorConfig } from "./runtime/executor";
 export type { ApprovalGate, PreflightDecision, ToolCallContext } from "./runtime/approval";
 export { createDefaultApprovalGate } from "./runtime/approval";
@@ -865,7 +903,7 @@ export { createDefaultApprovalGate } from "./runtime/approval";
 // 可选子路径（不进主入口）
 // "rimeagent/backends/vercel"→ VercelAIBackend（v0.3.0 · Phase 1；peer: ai）
 // "rimeagent/adapters/web"   → IndexedDB stores（v0.6.0 · Phase 4）
-// "rimeagent/contract"       → contract test 套件（v0.4.0 起 · Phase 2）
+// "rimeagent/contract"       → contract test 套件（Phase 7.3 发布）
 // "rimeagent/backends/native"→ NativeLLMBackend（附录 C 触发时；peer: @tauri-apps/api）
 ```
 
