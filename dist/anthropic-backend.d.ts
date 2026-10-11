@@ -1,8 +1,4 @@
 import type { AgentLLMConfig, OpenAIMessage, StreamChunk, ToolDefinition } from "./types";
-import { type LLMBackend } from "./llm-backend";
-export declare class AnthropicLLMBackend implements LLMBackend {
-    type: "anthropic";
-    streamChat(config: AgentLLMConfig, messages: OpenAIMessage[], signal?: AbortSignal, tools?: ToolDefinition[]): AsyncGenerator<StreamChunk>;
-    private parseSSE;
-}
+/** Internal Anthropic transport used by RimeAgentBackend. */
+export declare function streamAnthropicChat(config: AgentLLMConfig, messages: OpenAIMessage[], direct: boolean, signal?: AbortSignal, tools?: ToolDefinition[]): AsyncGenerator<StreamChunk>;
 //# sourceMappingURL=anthropic-backend.d.ts.map
