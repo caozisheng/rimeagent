@@ -1,6 +1,6 @@
 {
   "name": "rimeagent",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": false,
   "description": "Host-agnostic LLM agent engine with tool registry, streaming, and expert role orchestration",
   "type": "module",
@@ -11,6 +11,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./src/index.ts"
+    },
+    "./backends/vercel": {
+      "types": "./dist/adapters/vercel.d.ts",
+      "import": "./dist/adapters/vercel.js"
     }
   },
   "files": [
@@ -19,15 +23,28 @@
   ],
   "scripts": {
     "build": "tsc --project tsconfig.json",
+    "build:core": "tsc --project tsconfig.core.json",
     "dev": "tsc --watch --project tsconfig.json",
     "clean": "rm -rf dist tsconfig.tsbuildinfo",
     "prepublishOnly": "npm run build",
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck": "tsc --project tsconfig.test.json"
   },
   "dependencies": {
     "nanoid": "^5.1.5"
   },
+  "peerDependencies": {
+    "ai": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@ai-sdk/provider": "^2",
+    "@types/bun": "^1.4.2",
+    "ai": "^5",
     "typescript": "^5.8.3"
   },
   "keywords": [

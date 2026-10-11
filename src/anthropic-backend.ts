@@ -1,17 +1,15 @@
 import type { AgentLLMConfig, OpenAIMessage, StreamChunk, ToolCall, ToolDefinition } from "./types";
-import { type LLMBackend, shouldUseDirect } from "./llm-backend";
+import { normalizeError } from "./errors";
 import { convertTools, convertMessages } from "./anthropic-adapter";
 
-export class AnthropicLLMBackend implements LLMBackend {
-	type = "anthropic" as const;
-
-	async *streamChat(
-		config: AgentLLMConfig,
-		messages: OpenAIMessage[],
-		signal?: AbortSignal,
-		tools?: ToolDefinition[],
-	): AsyncGenerator<StreamChunk> {
-		const direct = shouldUseDirect(config);
+/** Internal Anthropic transport used by RimeAgentBackend. */
+export async function* streamAnthropicChat(
+	config: AgentLLMConfig,
+	messages: OpenAIMessage[],
+	direct: boolean,
+	signal?: AbortSignal,
+	tools?: ToolDefinition[],
+): AsyncGenerator<StreamChunk> {
 		const { system, messages: anthropicMessages } = convertMessages(messages);
 
 		const apiBody: Record<string, unknown> = {
@@ -56,26 +54,27 @@ export class AnthropicLLMBackend implements LLMBackend {
 			}
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : "Network error";
-			yield { type: "error", message: msg };
+			yield { type: "error", message: msg, error: normalizeError(err) };
 			return;
 		}
 
 		if (!response.ok) {
 			const text = await response.text().catch(() => "Unknown error");
-			yield { type: "error", message: `API error ${response.status}: ${text}` };
+			const message = `API error ${response.status}: ${text}`;
+			yield { type: "error", message, error: normalizeError({ status: response.status, message, responseBody: text }) };
 			return;
 		}
 
 		const body = response.body;
 		if (!body) {
-			yield { type: "error", message: "No response body" };
+			yield { type: "error", message: "No response body", error: normalizeError("No response body") };
 			return;
 		}
 
-		yield* this.parseSSE(body);
-	}
+		yield* parseSSE(body);
+}
 
-	private async *parseSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamChunk> {
+async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<StreamChunk> {
 		const reader = body.getReader();
 		const decoder = new TextDecoder();
 		let buffer = "";
@@ -181,7 +180,8 @@ export class AnthropicLLMBackend implements LLMBackend {
 
 						case "error": {
 							const error = parsed.error as { message?: string } | undefined;
-							yield { type: "error", message: error?.message ?? "Anthropic API error" };
+							const message = error?.message ?? "Anthropic API error";
+							yield { type: "error", message, error: normalizeError(error ?? message) };
 							return;
 						}
 					}
@@ -195,8 +195,10 @@ export class AnthropicLLMBackend implements LLMBackend {
 				};
 			}
 			yield { type: "done" };
+		} catch (err) {
+			const message = err instanceof Error ? err.message : "Network error";
+			yield { type: "error", message, error: normalizeError(err) };
 		} finally {
 			reader.releaseLock();
 		}
 	}
-}

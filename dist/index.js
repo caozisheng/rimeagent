@@ -1,8 +1,8 @@
 export { agentToolToDefinition } from "./tool-types";
 export { ToolRegistry, createToolRegistry } from "./tool-registry";
-export { CloudLLMBackend, shouldUseDirect } from "./llm-backend";
-export { AnthropicLLMBackend } from "./anthropic-backend";
-export { streamChatCompletion, getLLMBackend, registerLLMBackend, resolveProvider } from "./llm-client";
+export { RimeAgentBackend, shouldUseDirect } from "./llm-backend";
+export { streamChatCompletion, getLLMBackend, registerLLMBackend, registerLLMBackendFor, resolveProvider } from "./llm-client";
+export { normalizeError } from "./errors";
 export { ExpertRoleRegistry, createExpertRoleRegistry } from "./expert-roles";
 export { buildSystemPrompt } from "./prompt-builder";
 export { SkillRegistry, createSkillRegistry } from "./skills";

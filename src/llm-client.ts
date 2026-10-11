@@ -1,39 +1,44 @@
 import type { AgentLLMConfig, OpenAIMessage, StreamChunk, ToolDefinition } from "./types";
-import { CloudLLMBackend, type LLMBackend } from "./llm-backend";
-import { AnthropicLLMBackend } from "./anthropic-backend";
+import type { LLMBackend } from "./llm-backend";
+import { RimeAgentBackend } from "./llm-backend";
 
-const openaiBackend = new CloudLLMBackend();
-const anthropicBackend = new AnthropicLLMBackend();
+export { resolveProvider } from "./llm-backend";
+
+export type LLMBackendPredicate = (config: AgentLLMConfig) => boolean;
+
+const baselineBackend = new RimeAgentBackend();
 let customBackend: LLMBackend | null = null;
+const registrations: Array<{
+	predicate: LLMBackendPredicate;
+	backend: LLMBackend;
+}> = [];
 
 export function registerLLMBackend(backend: LLMBackend): void {
 	customBackend = backend;
 }
 
-export function resolveProvider(config: AgentLLMConfig): string {
-	if (config.provider && config.provider !== "custom") return config.provider;
-	try {
-		const host = new URL(config.baseUrl).hostname;
-		if (host === "api.anthropic.com") return "anthropic";
-	} catch { /* fallback */ }
-	return "openai";
-}
-
-function isNativeAnthropicHost(baseUrl: string): boolean {
-	try {
-		return new URL(baseUrl).hostname === "api.anthropic.com";
-	} catch {
-		return false;
+/** Register a config-specific route; the newest matching registration wins. */
+export function registerLLMBackendFor(
+	predicate: LLMBackendPredicate,
+	backend: LLMBackend,
+): () => void {
+	if (registrations.some((registration) => registration.predicate === predicate)) {
+		throw new Error("LLM backend predicate is already registered");
 	}
+	const registration = { predicate, backend };
+	registrations.push(registration);
+	return () => {
+		const index = registrations.indexOf(registration);
+		if (index !== -1) registrations.splice(index, 1);
+	};
 }
 
 export function getLLMBackend(config: AgentLLMConfig): LLMBackend {
-	if (customBackend) return customBackend;
-	const provider = resolveProvider(config);
-	// Only use native Anthropic backend for api.anthropic.com.
-	// Third-party proxies expose OpenAI-compatible endpoints even for Claude models.
-	if (provider === "anthropic" && isNativeAnthropicHost(config.baseUrl)) return anthropicBackend;
-	return openaiBackend;
+	for (let index = registrations.length - 1; index >= 0; index--) {
+		const registration = registrations[index];
+		if (registration.predicate(config)) return registration.backend;
+	}
+	return customBackend ?? baselineBackend;
 }
 
 export function streamChatCompletion(

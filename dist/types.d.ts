@@ -1,3 +1,4 @@
+import type { NormalizedError } from "./errors";
 export type AgentStatus = "idle" | "thinking" | "streaming" | "error";
 export type LLMProvider = "openai" | "anthropic" | "deepseek" | "local" | "custom";
 export interface AgentLLMConfig {
@@ -30,6 +31,10 @@ export interface TokenUsage {
     promptTokens?: number;
     completionTokens?: number;
     totalTokens?: number;
+    /** Provider-reported cost in USD; absent when not supplied. */
+    cost?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
 }
 export interface ToolDefinition {
     type: "function";
@@ -85,6 +90,7 @@ export type StreamChunk = {
 } | {
     type: "error";
     message: string;
+    error?: NormalizedError;
 };
 export interface OpenAIMessage {
     role: "system" | "user" | "assistant" | "tool";

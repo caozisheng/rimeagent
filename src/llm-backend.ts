@@ -1,4 +1,6 @@
 import type { AgentLLMConfig, OpenAIMessage, StreamChunk, ToolCall, ToolDefinition } from "./types";
+import { normalizeError } from "./errors";
+import { streamAnthropicChat } from "./anthropic-backend";
 
 export interface LLMBackend {
 	type: string;
@@ -18,8 +20,16 @@ export function shouldUseDirect(config: AgentLLMConfig): boolean {
 		typeof (window as unknown as Record<string, unknown>).__CAPACITOR__ !== "undefined";
 }
 
-export class CloudLLMBackend implements LLMBackend {
-	type = "cloud" as const;
+export function resolveProvider(config: AgentLLMConfig): string {
+	if (config.provider && config.provider !== "custom") return config.provider;
+	try {
+		if (new URL(config.baseUrl).hostname === "api.anthropic.com") return "anthropic";
+	} catch { /* fallback */ }
+	return "openai";
+}
+
+export class RimeAgentBackend implements LLMBackend {
+	type = "rimeagent" as const;
 
 	async *streamChat(
 		config: AgentLLMConfig,
@@ -28,6 +38,17 @@ export class CloudLLMBackend implements LLMBackend {
 		tools?: ToolDefinition[],
 	): AsyncGenerator<StreamChunk> {
 		const direct = shouldUseDirect(config);
+		// Only the native host speaks Anthropic here; third-party proxies stay OpenAI-compatible.
+		if (resolveProvider(config) === "anthropic") {
+			let nativeHost = false;
+			try {
+				nativeHost = new URL(config.baseUrl).hostname === "api.anthropic.com";
+			} catch { /* relative or malformed URLs use the compatible transport */ }
+			if (nativeHost) {
+				yield* streamAnthropicChat(config, messages, direct, signal, tools);
+				return;
+			}
+		}
 		const url = direct
 			? config.baseUrl.replace(/\/+$/, "") + "/chat/completions"
 			: "/api/ai/chat";
@@ -54,19 +75,20 @@ export class CloudLLMBackend implements LLMBackend {
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : "Network error";
 			console.error("[LLM] fetch failed:", msg);
-			yield { type: "error", message: msg };
+			yield { type: "error", message: msg, error: normalizeError(err) };
 			return;
 		}
 
 		if (!response.ok) {
 			const text = await response.text().catch(() => "Unknown error");
-			yield { type: "error", message: `API error ${response.status}: ${text}` };
+			const message = `API error ${response.status}: ${text}`;
+			yield { type: "error", message, error: normalizeError({ status: response.status, message, responseBody: text }) };
 			return;
 		}
 
 		const responseBody = response.body;
 		if (!responseBody) {
-			yield { type: "error", message: "No response body" };
+			yield { type: "error", message: "No response body", error: normalizeError("No response body") };
 			return;
 		}
 
@@ -178,6 +200,9 @@ export class CloudLLMBackend implements LLMBackend {
 				};
 			}
 			yield { type: "done" };
+		} catch (err) {
+			const message = err instanceof Error ? err.message : "Network error";
+			yield { type: "error", message, error: normalizeError(err) };
 		} finally {
 			reader.releaseLock();
 		}

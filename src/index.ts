@@ -21,9 +21,13 @@ export { ToolRegistry, createToolRegistry } from "./tool-registry";
 
 // LLM
 export type { LLMBackend } from "./llm-backend";
-export { CloudLLMBackend, shouldUseDirect } from "./llm-backend";
-export { AnthropicLLMBackend } from "./anthropic-backend";
-export { streamChatCompletion, getLLMBackend, registerLLMBackend, resolveProvider } from "./llm-client";
+export { RimeAgentBackend, shouldUseDirect } from "./llm-backend";
+export { streamChatCompletion, getLLMBackend, registerLLMBackend, registerLLMBackendFor, resolveProvider } from "./llm-client";
+export type { LLMBackendPredicate } from "./llm-client";
+
+// Error policy (execution/retries remain runtime-owned)
+export type { AgentErrorCategory, NormalizedError } from "./errors";
+export { normalizeError } from "./errors";
 
 // Expert roles
 export type { ExpertRoleDefinition, ExpertRoleRegistryInstance } from "./expert-roles";
