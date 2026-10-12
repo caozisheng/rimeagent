@@ -2,7 +2,7 @@ import { nanoid } from "nanoid";
 import { computeContextDigest } from "../store/checkpoint";
 import { isToolResult } from "../store/validation";
 import { normalizeError } from "../errors";
-function projectMessages(entries) {
+export function projectMessages(entries) {
     const messages = [];
     for (const entry of entries) {
         const base = { id: entry.id, createdAt: entry.ts };
@@ -21,18 +21,18 @@ function projectMessages(entries) {
     }
     return messages;
 }
-/** This stage cannot resume an interrupted tool batch; never send a broken tool protocol. */
+/** New runs require a complete protocol; resume repairs the final pending batch. */
 export function assertCompleteHistory(messages) {
     const pending = new Set();
     for (const message of messages) {
         if (message.role === "tool") {
             if (!message.toolCallId || !pending.delete(message.toolCallId)) {
-                throw normalizeError(new Error("Session has an unmatched tool result; use a fresh session until recovery is available"), { toolName: "history" });
+                throw normalizeError(new Error("Session has an unmatched tool result"), { toolName: "history" });
             }
             continue;
         }
         if (pending.size)
-            throw normalizeError(new Error("Session has an unfinished tool batch; use a fresh session until recovery is available"), { toolName: "history" });
+            throw normalizeError(new Error("Session has an unfinished tool batch; resume the existing run"), { toolName: "history" });
         for (const call of message.toolCalls ?? []) {
             if (pending.has(call.id))
                 throw normalizeError(new Error("Session has duplicate tool-call IDs"), { toolName: "history" });
@@ -40,7 +40,7 @@ export function assertCompleteHistory(messages) {
         }
     }
     if (pending.size)
-        throw normalizeError(new Error("Session has an unfinished tool batch; use a fresh session until recovery is available"), { toolName: "history" });
+        throw normalizeError(new Error("Session has an unfinished tool batch; resume the existing run"), { toolName: "history" });
 }
 /** Appends confirmed messages only; lifecycle/checkpoints never enter the model projection. */
 export class RuntimeHistory {
@@ -64,7 +64,7 @@ export class RuntimeHistory {
     async append(body) {
         await this.access(() => this.store.append(this.sessionId, { ...body, id: nanoid(), ts: Date.now() }));
     }
-    async recordMessage(message) {
+    async recordMessage(message, artifactId) {
         if (message.role === "user") {
             await this.append({ kind: "user_message", content: message.content });
         }
@@ -76,8 +76,15 @@ export class RuntimeHistory {
             const result = JSON.parse(message.content);
             if (!message.toolCallId || !isToolResult(result))
                 throw new TypeError("Initial tool messages require a serialized AgentToolResult and toolCallId");
-            await this.append({ kind: "tool_result", toolCallId: message.toolCallId, result });
+            await this.append({ kind: "tool_result", toolCallId: message.toolCallId, result,
+                ...(artifactId === undefined ? {} : { artifactId }) });
         }
+    }
+    async entries() {
+        return (await this.access(() => this.store.load(this.sessionId)))?.entries ?? [];
+    }
+    async checkpoints() {
+        return this.access(() => this.store.listCheckpoints(this.sessionId));
     }
     async load(initialMessages) {
         let snapshot = await this.access(() => this.store.load(this.sessionId));
@@ -88,7 +95,7 @@ export class RuntimeHistory {
         }
         return projectMessages(snapshot?.entries ?? []);
     }
-    async checkpoint(label) {
+    async checkpoint(label, boundary) {
         if (label !== undefined && typeof label !== "string")
             throw new TypeError("Checkpoint label must be a string");
         const snapshot = await this.access(() => this.store.load(this.sessionId));
@@ -100,10 +107,17 @@ export class RuntimeHistory {
         await this.access(() => this.store.saveCheckpoint({ checkpointId, sessionId: this.sessionId, createdAt: Date.now(),
             entrySeq: snapshot?.entries.length ?? 0, contextDigest,
             ...(this.parentId === undefined ? {} : { parentId: this.parentId }),
+            ...(boundary === undefined ? {} : { runId: boundary.runId, seq: boundary.seq }),
+            ...(boundary?.projectFacts === undefined ? {} : {
+                projectRevision: boundary.projectFacts.projectRevision,
+                ...(boundary.projectFacts.projectId === undefined ? {} : { projectId: boundary.projectFacts.projectId }),
+            }),
             ...(label === undefined ? {} : { label }) }));
         await this.append({ kind: "checkpoint", checkpointId });
         this.parentId = checkpointId;
-        return { checkpointId, sessionId: this.sessionId, contextDigest };
+        return { checkpointId, sessionId: this.sessionId, contextDigest,
+            ...(boundary?.projectFacts === undefined ? {} : { projectRevision: boundary.projectFacts.projectRevision,
+                ...(boundary.projectFacts.projectId === undefined ? {} : { projectId: boundary.projectFacts.projectId }) }) };
     }
 }
 //# sourceMappingURL=history.js.map

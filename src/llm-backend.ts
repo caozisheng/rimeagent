@@ -1,6 +1,7 @@
 import type { AgentLLMConfig, OpenAIMessage, StreamChunk, ToolCall, ToolDefinition } from "./types";
 import { normalizeError } from "./errors";
 import { streamAnthropicChat } from "./anthropic-backend";
+import { validateMaxOutputTokens } from "./anthropic-adapter";
 
 export interface LLMBackend {
 	type: string;
@@ -37,6 +38,7 @@ export class RimeAgentBackend implements LLMBackend {
 		signal?: AbortSignal,
 		tools?: ToolDefinition[],
 	): AsyncGenerator<StreamChunk> {
+		validateMaxOutputTokens(config);
 		const direct = shouldUseDirect(config);
 		// Only the native host speaks Anthropic here; third-party proxies stay OpenAI-compatible.
 		if (resolveProvider(config) === "anthropic") {
@@ -58,6 +60,9 @@ export class RimeAgentBackend implements LLMBackend {
 			const body: Record<string, unknown> = direct
 				? { model: config.model, messages, stream: true }
 				: { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, messages };
+			if (config.maxOutputTokens !== undefined) {
+				body[direct ? "max_tokens" : "maxTokens"] = config.maxOutputTokens;
+			}
 			if (tools && tools.length > 0) {
 				body.tools = tools;
 				if (direct) body.tool_choice = "auto";

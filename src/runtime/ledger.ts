@@ -12,6 +12,12 @@ export interface LedgerRecord {
 	readonly event:
 		| { kind: "model_call"; provider: string; model: string; requestIndex: number; usage: TokenUsage }
 		| {
+			kind: "tool_intent";
+			toolCallId: string;
+			tool: string;
+			argsDigest: string;
+		}
+		| {
 			kind: "tool_exec";
 			toolCallId: string;
 			tool: string;
@@ -25,6 +31,7 @@ export interface LedgerRecord {
 		}
 		| { kind: "retry"; toolCallId?: string; attempt: number; category: AgentErrorCategory }
 		| { kind: "approval"; toolCallId: string; decision: ApprovalDecision }
+		| { kind: "terminal"; status: "completed" | "failed" | "interrupted" }
 		| { kind: "compaction" | "cancellation"; detail?: string };
 }
 
@@ -32,20 +39,25 @@ export interface RuntimeLedger {
 	append(record: LedgerRecord): Promise<void>;
 	/** Successful tool executions only; toolCallId is global across runs. */
 	hasExecuted(toolCallId: string): Promise<boolean>;
+	/** Global replay lookup: successful execution dominates later failures. */
+	getToolExecution(toolCallId: string): Promise<LedgerRecord | null>;
 	query(runId: string): Promise<LedgerRecord[]>;
 }
 
 const eventKeys: Record<string, readonly string[]> = {
 	model_call: ["kind", "provider", "model", "requestIndex", "usage"],
+	tool_intent: ["kind", "toolCallId", "tool", "argsDigest"],
 	tool_exec: [
 		"kind", "toolCallId", "tool", "argsDigest", "outcome", "messageDigest",
 		"artifactId", "commandId", "projectRevisionBefore", "projectRevisionAfter",
 	],
 	retry: ["kind", "toolCallId", "attempt", "category"],
 	approval: ["kind", "toolCallId", "decision"],
+	terminal: ["kind", "status"],
 	compaction: ["kind", "detail"],
 	cancellation: ["kind", "detail"],
 };
+
 
 const errorCategories: Record<AgentErrorCategory, true> = {
 	provider: true,
@@ -54,7 +66,7 @@ const errorCategories: Record<AgentErrorCategory, true> = {
 	interrupted: true,
 };
 
-function isLedgerRecord(value: unknown): value is LedgerRecord {
+export function isLedgerRecord(value: unknown): value is LedgerRecord {
 	if (!isRecord(value) || !hasOnlyKeys(value, ["runId", "seq", "ts", "event"])
 		|| !["runId", "seq", "ts", "event"].every(key => Object.hasOwn(value, key))
 		|| !isId(value.runId) || !isCount(value.seq) || value.seq === 0
@@ -68,6 +80,9 @@ function isLedgerRecord(value: unknown): value is LedgerRecord {
 			return ["provider", "model", "requestIndex", "usage"].every(key => Object.hasOwn(event, key))
 				&& isId(event.provider) && isId(event.model) && isCount(event.requestIndex)
 				&& isTokenUsage(event.usage);
+		case "tool_intent":
+			return ["toolCallId", "tool", "argsDigest"].every(key => Object.hasOwn(event, key))
+				&& isId(event.toolCallId) && isId(event.tool) && isId(event.argsDigest);
 		case "tool_exec":
 			return ["toolCallId", "tool", "argsDigest", "outcome", "messageDigest"].every(key => Object.hasOwn(event, key))
 				&& isId(event.toolCallId) && isId(event.tool) && isId(event.argsDigest)
@@ -81,6 +96,8 @@ function isLedgerRecord(value: unknown): value is LedgerRecord {
 		case "approval":
 			return Object.hasOwn(event, "toolCallId") && Object.hasOwn(event, "decision") && isId(event.toolCallId)
 				&& (event.decision === "allow" || event.decision === "deny" || event.decision === "suspend");
+		case "terminal":
+			return event.status === "completed" || event.status === "failed" || event.status === "interrupted";
 		case "compaction":
 		case "cancellation":
 			return event.detail === undefined || typeof event.detail === "string";
@@ -96,6 +113,9 @@ function isLedgerRecord(value: unknown): value is LedgerRecord {
 export class InMemoryLedger implements RuntimeLedger {
 	private readonly recordsByRun = new Map<string, LedgerRecord[]>();
 	private readonly successfulToolCallIds = new Set<string>();
+	private readonly successfulExecutions = new Map<string, LedgerRecord>();
+	private readonly latestToolRecords = new Map<string, LedgerRecord>();
+	private readonly claimedIntents = new Set<string>();
 
 	async append(record: LedgerRecord): Promise<void> {
 		if (!isLedgerRecord(record)) throw new TypeError("Invalid ledger record");
@@ -107,17 +127,33 @@ export class InMemoryLedger implements RuntimeLedger {
 		if (previous && snapshot.seq <= previous.seq) {
 			throw new Error("Ledger sequence must strictly increase within a run");
 		}
+		if (snapshot.event.kind === "tool_intent" && this.claimedIntents.has(snapshot.event.toolCallId)) {
+			throw new Error("Tool call intent already claimed");
+		}
 		// No await between validation and commit: failed appends cannot mutate either index.
 		if (records) records.push(snapshot);
 		else this.recordsByRun.set(snapshot.runId, [snapshot]);
-		if (snapshot.event.kind === "tool_exec" && snapshot.event.outcome === "success") {
-			this.successfulToolCallIds.add(snapshot.event.toolCallId);
+		if (snapshot.event.kind === "tool_intent") {
+			this.claimedIntents.add(snapshot.event.toolCallId);
+			this.latestToolRecords.set(snapshot.event.toolCallId, snapshot);
+		} else if (snapshot.event.kind === "tool_exec") {
+			this.latestToolRecords.set(snapshot.event.toolCallId, snapshot);
+			if (snapshot.event.outcome === "success") {
+				this.successfulToolCallIds.add(snapshot.event.toolCallId);
+				this.successfulExecutions.set(snapshot.event.toolCallId, snapshot);
+			}
 		}
 	}
 
 	async hasExecuted(toolCallId: string): Promise<boolean> {
 		if (!isId(toolCallId)) throw new TypeError("Invalid tool call id");
 		return this.successfulToolCallIds.has(toolCallId);
+	}
+
+	async getToolExecution(toolCallId: string): Promise<LedgerRecord | null> {
+		if (!isId(toolCallId)) throw new TypeError("Invalid tool call id");
+		const record = this.successfulExecutions.get(toolCallId) ?? this.latestToolRecords.get(toolCallId);
+		return record ? cloneJson(record) : null;
 	}
 
 	async query(runId: string): Promise<LedgerRecord[]> {

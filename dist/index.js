@@ -15,7 +15,9 @@ export { isAgentSessionEntry, serializeAgentSessionEntry, parseAgentSessionEntry
 export { InMemorySessionStore } from "./store/session-store";
 export { computeContextDigest } from "./store/checkpoint";
 export { InMemoryArtifactStore } from "./store/artifact-store";
-export { InMemoryLedger } from "./runtime/ledger";
-// Agent run lifecycle (Phase 3)
+export { InMemoryLedger, isLedgerRecord } from "./runtime/ledger";
+export { createToolExecutor } from "./runtime/executor";
+export { createContextManager } from "./runtime/context-manager";
+// Agent run lifecycle, durable recovery and context management (Phase 3–5)
 export { createAgentRuntime } from "./runtime/runtime";
 //# sourceMappingURL=index.js.map

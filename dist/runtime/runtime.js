@@ -1,11 +1,16 @@
 import { nanoid } from "nanoid";
 import { InMemorySessionStore } from "../store/session-store";
 import { computeContextDigest } from "../store/checkpoint";
+import { InMemoryArtifactStore } from "../store/artifact-store";
 import { createAgentRuntimeEvent } from "../events";
 import { normalizeError } from "../errors";
 import { createToolRegistry } from "../tool-registry";
 import { runSessionIterations } from "./iteration";
-import { RuntimeHistory, assertCompleteHistory } from "./history";
+import { RuntimeHistory, assertCompleteHistory, projectMessages } from "./history";
+import { assertNewRun, loadResumeState, rejectRecovery } from "./recovery";
+import { createRuntimeRequestContext } from "./request-context";
+import { InMemoryLedger } from "./ledger";
+import { createToolExecutor } from "./executor";
 function createRuntime(config, compatibility) {
     if (!compatibility && (!config.sessionId || !config.expertRoleId))
         throw new TypeError("Runtime requires sessionId and expertRoleId");
@@ -13,6 +18,9 @@ function createRuntime(config, compatibility) {
     if (!compatibility && (!Number.isSafeInteger(maxIterations) || maxIterations < 0))
         throw new TypeError("maxIterations must be a nonnegative safe integer");
     const history = new RuntimeHistory(config.sessionStore, config.sessionId);
+    const ledger = config.ledger ?? new InMemoryLedger();
+    const artifactStore = config.artifactStore ?? new InMemoryArtifactStore();
+    const executor = createToolExecutor({ sessionId: config.sessionId, tools: config.tools, ledger, artifactStore });
     const registry = createToolRegistry();
     for (const tool of config.tools) {
         if (registry.get(tool.name))
@@ -23,55 +31,131 @@ function createRuntime(config, compatibility) {
     let active;
     let llmConfig = config.llmConfig;
     let activeRoleId = config.activeRoleId ?? config.expertRoleId;
-    async function executeToolCall(call) {
-        const tool = registry.get(call.function.name);
-        if (tool?.annotations?.requiresApproval || tool?.annotations?.destructive || tool?.requiresConfirmation) {
-            return { success: false, message: "Tool requires approval; approval execution is not available in this runtime version" };
-        }
-        return registry.executeToolCall(call);
-    }
-    async function* run(userMessage, callerSignal) {
+    let activeCheckpoint;
+    async function* execute(userInput, resumeId, callerSignal) {
         if (active)
             throw new Error("An agent run is already active");
-        if (typeof userMessage !== "string")
+        if (resumeId === undefined && typeof userInput !== "string")
             throw new TypeError("User message must be a string");
         const controller = new AbortController();
         const signal = callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal;
         active = controller;
-        state = "running";
-        const runId = nanoid();
+        const previousState = state;
+        const runId = resumeId ?? nanoid();
         const persistenceFailures = history.persistenceFailures;
+        let ledgerFailed = false;
         let seq = 0;
+        let iteration = 0;
+        let phase = "model";
         let started = false;
+        let validated = false;
         let terminal = false;
         let lastCheckpoint;
         let iterator;
-        const event = (payload) => {
-            const next = ++seq;
-            if (compatibility) {
-                // Internal bridge only: preserve the legacy callback value without strict v2 serialization.
-                return { v: 2, runId, seq: next, ts: Date.now(), type: "kind" in payload ? payload.kind : payload.type, payload };
+        const nextSeq = () => ++seq;
+        // Message hooks can settle the phase while the iteration generator is suspended.
+        const hasSettledResponse = () => phase === "settled";
+        async function recordLedger(event) {
+            if (compatibility)
+                return;
+            try {
+                await ledger.append({ runId, seq: nextSeq(), ts: Date.now(), event });
             }
-            return createAgentRuntimeEvent(runId, next, Date.now(), payload);
-        };
-        async function interrupt() {
-            lastCheckpoint = await history.checkpoint();
-            await history.append({ kind: "run_interrupted", runId, cause: "interrupted", lastDurableBoundary: lastCheckpoint.checkpointId });
+            catch (cause) {
+                ledgerFailed = true;
+                throw cause;
+            }
+        }
+        async function saveCursor() {
+            if (compatibility)
+                return;
+            await history.append({ kind: "run_state", runId, seq, iteration, phase, activeRoleId,
+                ...(lastCheckpoint === undefined ? {} : { checkpointId: lastCheckpoint.checkpointId }) });
+        }
+        async function boundary(label) {
+            const facts = config.hooks?.getProjectFacts?.();
+            lastCheckpoint = await history.checkpoint(label, compatibility ? undefined : {
+                runId, seq: nextSeq(), ...(facts === undefined ? {} : { projectFacts: facts })
+            });
+            return lastCheckpoint;
+        }
+        async function assertProjectBoundary() {
+            if (!lastCheckpoint || compatibility)
+                return;
+            const facts = config.hooks?.getProjectFacts?.();
+            if (lastCheckpoint.projectRevision !== undefined && facts?.projectRevision !== lastCheckpoint.projectRevision)
+                rejectRecovery("Project revision changed before external execution");
+            if (lastCheckpoint.projectId !== undefined && facts?.projectId !== lastCheckpoint.projectId)
+                rejectRecovery("Project identity changed before external execution");
+        }
+        async function assertHostBoundary() {
+            if (!lastCheckpoint || compatibility)
+                return;
+            await assertProjectBoundary();
+            if (computeContextDigest(projectMessages(await history.entries())) !== lastCheckpoint.contextDigest)
+                rejectRecovery("Context digest changed before external execution");
+        }
+        async function event(payload) {
+            const next = nextSeq();
+            if (compatibility)
+                return { v: 2, runId, seq: next, ts: Date.now(),
+                    type: "kind" in payload ? payload.kind : payload.type, payload };
+            const result = createAgentRuntimeEvent(runId, next, Date.now(), payload);
+            await saveCursor();
+            return result;
+        }
+        async function interrupt(cause = "interrupted") {
+            // Do not adopt unrelated host changes while settling an interruption.
+            if (!lastCheckpoint || compatibility)
+                await boundary();
+            await history.append({ kind: "run_interrupted", runId, cause, lastDurableBoundary: lastCheckpoint.checkpointId });
+            await recordLedger({ kind: "terminal", status: "interrupted" });
+            const result = await event({ kind: "run_interrupted", cause });
             terminal = true;
             state = "interrupted";
-            return event({ kind: "run_interrupted", cause: "interrupted" });
+            return result;
         }
         try {
-            const messages = compatibility ? [...compatibility.params.messages] : await history.load(config.initialMessages);
-            if (!compatibility)
-                assertCompleteHistory(messages);
-            await history.append({ kind: "run_started", runId });
-            started = true;
-            if (!compatibility) {
-                await history.append({ kind: "user_message", content: userMessage });
-                messages.push({ id: nanoid(), role: "user", content: userMessage, createdAt: Date.now() });
+            let restored;
+            let messages;
+            if (resumeId !== undefined) {
+                restored = await loadResumeState(history, ledger, resumeId, config.hooks?.getProjectFacts?.(), artifactStore);
+                messages = restored.messages;
+                seq = restored.seq;
+                iteration = restored.iteration;
+                phase = restored.phase;
+                activeRoleId = restored.activeRoleId;
+                lastCheckpoint = restored.checkpoint;
+                llmConfig = config.hooks?.onRoleSwitch?.(activeRoleId) || config.llmConfig;
             }
-            yield event({ kind: "run_started", sessionId: config.sessionId });
+            else {
+                if (!compatibility)
+                    assertNewRun(await history.entries());
+                if (!compatibility && config.initialMessages)
+                    assertCompleteHistory(config.initialMessages);
+                messages = compatibility ? [...compatibility.params.messages] : await history.load(config.initialMessages);
+                if (!compatibility) {
+                    assertCompleteHistory(messages);
+                    activeRoleId = config.activeRoleId ?? config.expertRoleId;
+                    llmConfig = config.llmConfig;
+                }
+            }
+            validated = true;
+            state = "running";
+            activeCheckpoint = boundary;
+            const userMessage = restored?.userMessage ?? userInput;
+            if (!restored) {
+                await history.append({ kind: "run_started", runId });
+                started = true;
+                if (!compatibility) {
+                    await history.append({ kind: "user_message", content: userMessage });
+                    messages.push({ id: nanoid(), role: "user", content: userMessage, createdAt: Date.now() });
+                }
+            }
+            else
+                started = true;
+            await boundary();
+            yield await event({ kind: restored ? "run_resumed" : "run_started", sessionId: config.sessionId });
             if (signal.aborted) {
                 yield await interrupt();
                 return;
@@ -82,7 +166,18 @@ function createRuntime(config, compatibility) {
                 locale: config.locale, switchRoleToolDef: config.switchRoleToolDef, tools: registry.getDefinitions(), signal,
             };
             const sessionConfig = compatibility?.config ?? {
-                maxIterations, onToolCall: executeToolCall,
+                maxIterations,
+                async onToolCall(call) {
+                    try {
+                        return await executor.execute(call, { runId, nextSeq, signal });
+                    }
+                    catch (cause) {
+                        // Executor persistence errors must remain rejected, not a false completion.
+                        if (!(typeof cause === "object" && cause !== null && "category" in cause))
+                            ledgerFailed = true;
+                        throw cause;
+                    }
+                },
                 onRoleSwitch(roleId) {
                     activeRoleId = roleId;
                     const updated = config.hooks?.onRoleSwitch?.(roleId);
@@ -91,70 +186,123 @@ function createRuntime(config, compatibility) {
                     return updated;
                 },
             };
-            iterator = runSessionIterations(params, sessionConfig, {
-                legacyToolResults: compatibility !== undefined,
-                beforeIteration: compatibility ? undefined : failures => {
-                    const dynamicContext = config.hooks?.buildDynamicContext?.() ?? null;
-                    const rag = config.hooks?.buildRagContext?.(userMessage, {
-                        appState: dynamicContext ?? undefined, failedTools: failures.map(f => f.toolName),
-                    }) ?? "";
-                    const recovery = failures.length ? config.hooks?.buildErrorRecovery?.(failures) : undefined;
-                    return { dynamicContext, ragContext: recovery ? [rag, recovery].filter(Boolean).join("\n\n") : rag || null };
-                },
-                onMessage: async (message) => {
-                    if (compatibility && message.role === "tool") {
-                        const result = JSON.parse(message.content);
-                        // Private legacy store retains a summary; the kernel keeps the full original model history.
-                        await history.append({ kind: "tool_result", toolCallId: message.toolCallId,
-                            result: { success: result.success, message: result.message } });
-                    }
-                    else
-                        await history.recordMessage(message);
-                },
-                onToolStart: async (call) => {
-                    const argsDigest = computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [call] }]);
-                    await history.append({ kind: "tool_call", toolCallId: call.id, name: call.function.name, argsDigest });
-                },
-            });
+            const requestContext = compatibility ? undefined : createRuntimeRequestContext({ config, artifactStore, signal,
+                assertBoundary: assertHostBoundary, recordLedger, onPersistenceFailure: () => { ledgerFailed = true; },
+                hasPersistenceFailure: () => ledgerFailed || history.persistenceFailures !== persistenceFailures });
             let outcome;
-            while (true) {
-                const next = await iterator.next();
-                if (next.done) {
-                    outcome = next.value;
-                    break;
+            if (hasSettledResponse())
+                outcome = { reason: "response", iterations: iteration + 1 };
+            else {
+                iterator = runSessionIterations(params, sessionConfig, {
+                    legacyToolResults: compatibility !== undefined,
+                    initialState: restored ? { iterationOffset: iteration, pendingToolCalls: restored.pendingToolCalls, failures: restored.failures } : undefined,
+                    beforeRequest: requestContext?.prepare,
+                    onContextOverflow: requestContext?.recover,
+                    onPreparationError: requestContext?.guardPreparationError,
+                    onMessage: async (message, usage) => {
+                        if (!compatibility && message.role === "assistant") {
+                            await recordLedger({ kind: "model_call", provider: llmConfig.provider ?? "openai", model: llmConfig.model,
+                                requestIndex: iteration, usage: usage ?? {} });
+                            if (usage)
+                                await history.append({ kind: "usage", runId, usage });
+                            await assertHostBoundary();
+                        }
+                        if (compatibility && message.role === "tool") {
+                            const result = JSON.parse(message.content);
+                            await history.append({ kind: "tool_result", toolCallId: message.toolCallId, result: { success: result.success, message: result.message } });
+                        }
+                        else {
+                            let artifactId;
+                            if (message.role === "tool" && message.toolCallId) {
+                                try {
+                                    const execution = await ledger.getToolExecution(message.toolCallId);
+                                    if (execution?.event.kind === "tool_exec")
+                                        artifactId = execution.event.artifactId;
+                                }
+                                catch (cause) {
+                                    ledgerFailed = true;
+                                    throw cause;
+                                }
+                            }
+                            await history.recordMessage(message, artifactId);
+                        }
+                        if (!compatibility) {
+                            if (message.role === "assistant")
+                                phase = message.toolCalls?.length ? "tools" : "settled";
+                            if (message.role === "assistant")
+                                await assertProjectBoundary();
+                            await boundary();
+                            await saveCursor();
+                        }
+                    },
+                    onToolStart: async (call) => {
+                        await assertHostBoundary();
+                        await boundary();
+                        const argsDigest = computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [call] }]);
+                        await history.append({ kind: "tool_call", toolCallId: call.id, name: call.function.name, argsDigest });
+                    },
+                });
+                while (true) {
+                    const next = await iterator.next();
+                    if (next.done) {
+                        outcome = next.value;
+                        break;
+                    }
+                    const payload = next.value;
+                    if (signal.aborted) {
+                        yield await interrupt();
+                        return;
+                    }
+                    if ("kind" in payload && payload.kind === "iteration_start") {
+                        await assertHostBoundary();
+                        iteration = payload.iteration;
+                        phase = "model";
+                        await boundary();
+                    }
+                    if ("kind" in payload && payload.kind === "iteration_end") {
+                        if (phase !== "settled") {
+                            phase = "model";
+                            iteration = payload.iteration + 1;
+                        }
+                        await boundary();
+                    }
+                    yield await event(payload);
                 }
-                const payload = next.value;
-                if (signal.aborted) {
-                    yield await interrupt();
-                    return;
-                }
-                if ("kind" in payload && payload.kind === "iteration_end")
-                    lastCheckpoint = await history.checkpoint();
-                if ("type" in payload && payload.type === "message_end" && payload.usage) {
-                    await history.append({ kind: "usage", runId, usage: payload.usage });
-                }
-                yield event(payload);
             }
             if (signal.aborted || outcome.reason === "interrupted") {
                 yield await interrupt();
                 return;
             }
             if (outcome.reason === "error") {
-                const error = normalizeError(outcome.errorMessage ?? "Model request failed");
+                const error = outcome.error ?? normalizeError(outcome.errorMessage ?? "Model request failed");
+                if (error.category === "context_overflow") {
+                    await history.append({ kind: "error", error });
+                    yield await interrupt("context_overflow");
+                    return;
+                }
+                await recordLedger({ kind: "terminal", status: "failed" });
                 await history.append({ kind: "run_failed", runId, error });
+                phase = "settled";
+                const result = await event({ kind: "run_failed", error });
                 terminal = true;
                 state = "settled";
-                yield event({ kind: "run_failed", error });
+                yield result;
                 return;
             }
-            const reason = outcome.reason;
-            await history.append({ kind: "run_completed", runId, reason, iterations: outcome.iterations });
+            phase = "settled";
+            const result = await event({ kind: "run_completed", reason: outcome.reason, iterations: outcome.iterations });
+            await recordLedger({ kind: "terminal", status: "completed" });
+            await history.append({ kind: "run_completed", runId, reason: outcome.reason, iterations: outcome.iterations });
             terminal = true;
             state = "settled";
-            yield event({ kind: "run_completed", reason, iterations: outcome.iterations });
+            yield result;
         }
         catch (cause) {
-            if (history.persistenceFailures !== persistenceFailures) {
+            if (!validated) {
+                state = previousState;
+                throw cause;
+            }
+            if (history.persistenceFailures !== persistenceFailures || ledgerFailed) {
                 terminal = true;
                 state = "settled";
                 if (started) {
@@ -174,10 +322,19 @@ function createRuntime(config, compatibility) {
                 return;
             }
             const error = normalizeError(cause);
+            if (error.category === "context_overflow") {
+                await history.append({ kind: "error", error });
+                yield await event({ type: "error", message: error.message });
+                yield await interrupt("context_overflow");
+                return;
+            }
+            await recordLedger({ kind: "terminal", status: "failed" });
             await history.append({ kind: "run_failed", runId, error });
+            phase = "settled";
+            const result = await event({ kind: "run_failed", error });
             terminal = true;
             state = "settled";
-            yield event({ kind: "run_failed", error });
+            yield result;
         }
         finally {
             controller.abort();
@@ -206,23 +363,25 @@ function createRuntime(config, compatibility) {
             }
             finally {
                 active = undefined;
-                if (!terminal)
+                activeCheckpoint = undefined;
+                if (validated && !terminal)
                     state = "interrupted";
             }
         }
     }
     return {
         get state() { return state; },
-        run,
-        checkpoint: label => history.checkpoint(label),
+        run: (message, signal) => execute(message, undefined, signal),
+        resume: (runId, signal) => execute(undefined, runId, signal),
+        checkpoint: label => activeCheckpoint ? activeCheckpoint(label) : history.checkpoint(label),
         abort(reason) { active?.abort(reason); },
     };
 }
-/** Run lifecycle and confirmed-message history; disk recovery is added in Phase 4. */
+/** Durable run lifecycle and confirmed-message history. */
 export function createAgentRuntime(config) {
     return createRuntime(config);
 }
-/** Internal bridge: the legacy session has no additional user input or public v2 events. */
+/** Internal bridge: legacy sessions add no user input and expose their original callback values. */
 export function createSessionRuntime(params, config) {
     const runtime = createRuntime({ sessionId: nanoid(), sessionStore: new InMemorySessionStore(),
         llmConfig: params.llmConfig, expertRoleId: params.expertRoleId, tools: [], maxIterations: config.maxIterations }, { params, config });

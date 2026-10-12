@@ -30,6 +30,7 @@ const entries: AgentSessionEntry[] = [
   { kind: "run_failed", id: "e14", ts: 13, runId: "run-1", error },
   { kind: "error", id: "e15", ts: 14, error },
   { kind: "usage", id: "e16", ts: 15, runId: "run-1", usage: { totalTokens: 3 } },
+  { kind: "run_state", id: "e17", ts: 16, runId: "run-1", seq: 42, iteration: 3, phase: "tools", activeRoleId: "editor", checkpointId: "cp-1" },
 ];
 
 describe("session entries", () => {
@@ -69,6 +70,13 @@ describe("session entries", () => {
     expect(isAgentSessionEntry({ ...entries[0], ts: -1 })).toBe(false);
     expect(isAgentSessionEntry({ ...entries[0], kind: "wat" })).toBe(false);
     expect(isAgentSessionEntry({ ...entries[0], id: Object.create({ value: "inherited" }) })).toBe(false);
+  });
+
+  test.each([
+    { seq: 0 }, { seq: -1 }, { seq: 0.5 }, { iteration: -1 }, { iteration: 0.5 },
+    { phase: "unknown" }, { activeRoleId: "" }, { runId: "" }, { checkpointId: "" },
+  ])("rejects corrupt durable run cursors: %j", changes => {
+    expect(isAgentSessionEntry({ ...entries[16], ...changes })).toBe(false);
   });
 
   test("exotic array prototypes are rejected consistently by guards and persistence", () => {

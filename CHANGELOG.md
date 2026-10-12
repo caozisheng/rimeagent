@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0 — 2026-10-12 (unreleased)
+
+- Added `createContextManager()` and runtime context budgets over system prompts, complete conversation/tool turns and tool schemas, with an injectable tokenizer.
+- Added immutable large-tool-result artifact projection. Models receive bounded success/message summaries plus artifact IDs; full results, call identities and replay caches remain intact.
+- Added checkpoint-safe append-only compaction with eight-field host summaries, cumulative source IDs and restored prior summaries. Latest user requests and complete/pending tool batches stay protected; summaries never masquerade as current project facts.
+- Runtime requests inject fresh host facts before dynamic context and rebuild RAG/error context on requests, role switches, tool failures and compaction. Durable checkpoint digests continue to cover full confirmed history.
+- Added bounded context-overflow recovery: forced compaction, reduced output cap, then host skill/tool allowlists. Exhaustion persists an interrupted, resumable run rather than irreversible failure; provider/network/permission errors are not automatically retried.
+- Added effective output caps to OpenAI direct/proxy, Anthropic and optional Vercel transport. Runtime budget overrides preserve config-specific backend selection and do not mutate host configuration.
+- Added long-session, compaction, artifact, retry/cancellation, storage-fault and transport-budget regressions. Real HTTP/SSE + Chromium IndexedDB verified 55 tool turns, staged overflow and same-run reload recovery without repeating a committed edit.
+- Closed reviewed safety gaps: reject project changes during model planning before rebinding confirmation; preserve model usage for rejected plans; enforce input limits over the final backend message/tool representation; propagate the original preparation storage exception even on the final recovery attempt.
+- Preserved legacy loop/session event shapes and callback behavior. Approval suspend/resume, parallel tool strategies and NativeLLMBackend remain excluded from this increment.
+
+## 0.6.0 — 2026-10-11 (unreleased)
+
+- Implemented durable `resume(runId, signal?)` using the same run ID and a sequence beyond persisted events, checkpoints and ledger records; no duplicate user message or second agent loop.
+- Persisted recovery cursors and confirmed boundaries; resume verifies session head, checkpoint digest and host project identity/revision before external execution. Partial model output restarts; pending tool batches continue; confirmed final responses settle without another provider call.
+- Added serial `createToolExecutor()` with atomic global intent claims, immutable JSON result artifacts and completed success/failure replay. Non-idempotent uncertain effects block rather than retry; read-only/idempotent recovery records retries. Approval-sensitive execution remains refused.
+- Added ledger intent/terminal records, global execution lookup, model usage and host command/revision linkage. Model accounting commits before confirmed assistant history; absent provider usage remains unknown, not fabricated zero consumption. Ledger does not store raw arguments/results or LLM credentials.
+- Added optional `rimeagent/adapters/web` IndexedDB session/artifact/ledger stores. Transactions commit before resolution; races and aborts roll back IDs/indexes; open/blocked/quota/schema failures reject without volatile fallback.
+- Added framework-neutral storage contract probes shared by memory and IndexedDB, host SQLite/file guidance, crash-window and reopened-store runtime coverage. Real Chromium reload/resume verified each of two edits executed once with the original run ID.
+- Fresh runs reset their configured initial role/model; resume restores only its saved run state. Added failing-before/passing-after regressions for role leakage and final/role-switch model-accounting crash windows.
+- Legacy session/callback behavior remains compatible. Compaction, approval suspend/resume and NativeLLMBackend are not implemented.
+
 ## 0.5.0 — 2026-10-11 (unreleased)
 
 - Added `createAgentRuntime()` with run/checkpoint/abort and observable idle/running/interrupted/settled lifecycle state.

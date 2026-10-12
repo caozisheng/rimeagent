@@ -22,7 +22,9 @@ export type AgentSessionEntry =
 	| { kind: "run_completed"; id: string; ts: number; runId: string; reason?: "response" | "max_iterations"; iterations?: number }
 	| { kind: "run_failed"; id: string; ts: number; runId: string; error: NormalizedError }
 	| { kind: "error"; id: string; ts: number; error: NormalizedError }
-	| { kind: "usage"; id: string; ts: number; runId: string; usage: TokenUsage };
+	| { kind: "usage"; id: string; ts: number; runId: string; usage: TokenUsage }
+	| { kind: "run_state"; id: string; ts: number; runId: string; seq: number; iteration: number;
+		phase: "model" | "tools" | "settled"; activeRoleId: string; checkpointId?: string };
 
 export interface AgentSessionSnapshot {
 	readonly sessionId: string;

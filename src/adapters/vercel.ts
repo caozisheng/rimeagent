@@ -3,6 +3,7 @@ import type { AssistantModelMessage, LanguageModel, ModelMessage, ToolSet } from
 import type { LLMBackend } from "../llm-backend";
 import { normalizeError } from "../errors";
 import type { AgentLLMConfig, OpenAIMessage, StreamChunk, TokenUsage, ToolCall, ToolDefinition } from "../types";
+import { validateMaxOutputTokens } from "../anthropic-adapter";
 
 export type VercelModelResolver = (config: AgentLLMConfig) => LanguageModel | Promise<LanguageModel>;
 
@@ -70,6 +71,7 @@ export class VercelAIBackend implements LLMBackend {
 
 	async *streamChat(config: AgentLLMConfig, messages: OpenAIMessage[], signal?: AbortSignal,
 		tools?: ToolDefinition[]): AsyncGenerator<StreamChunk> {
+		validateMaxOutputTokens(config);
 		const controller = new AbortController();
 		const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
 		try {
@@ -97,7 +99,8 @@ export class VercelAIBackend implements LLMBackend {
 				sdkTools[tool.name] = { description: tool.description, inputSchema: jsonSchema(tool.parameters) };
 			}
 			const result = streamText({ model, system, messages: systemCount ? converted.slice(systemCount) : converted, abortSignal: requestSignal,
-				tools: sdkTools, maxRetries: 0, onError: () => {} });
+				tools: sdkTools, maxRetries: 0, onError: () => {},
+				...(config.maxOutputTokens === undefined ? {} : { maxOutputTokens: config.maxOutputTokens }) });
 			const indices = new Map<string, number>();
 			const calls = new Map<string, ToolCall>();
 			let metadata: Record<string, Record<string, unknown>> | undefined;

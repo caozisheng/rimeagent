@@ -17,7 +17,7 @@ export interface AgentArtifactStore {
 
 const ARTIFACT_KEYS = ["artifactId", "sessionId", "contentType", "value"];
 
-function isArtifact(value: unknown): value is AgentArtifact {
+export function isArtifact(value: unknown): value is AgentArtifact {
 	return isRecord(value) && hasOnlyKeys(value, ARTIFACT_KEYS)
 		&& ARTIFACT_KEYS.every(key => Object.hasOwn(value, key))
 		&& isId(value.artifactId) && isId(value.sessionId) && isId(value.contentType)

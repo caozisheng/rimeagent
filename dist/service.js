@@ -1,6 +1,7 @@
 import { ExpertRoleRegistry } from "./expert-roles";
 import { buildSystemPrompt } from "./prompt-builder";
-import { streamChatCompletion } from "./llm-client";
+import { getLLMBackend, streamChatCompletion } from "./llm-client";
+import { normalizeError } from "./errors";
 export const SWITCH_ROLE_TOOL_NAME = "switch_expert_role";
 function buildDefaultSwitchRoleTool() {
     const roles = ExpertRoleRegistry.getAll().filter((r) => !r.isOrchestrator);
@@ -26,8 +27,8 @@ function buildDefaultSwitchRoleTool() {
         },
     };
 }
-export async function* runAgentLoop(params) {
-    const { messages, llmConfig, expertRoleId, dynamicContext, ragContext, identityPrompt, workRules, tools, locale, signal, } = params;
+export function prepareAgentRequest(params) {
+    const { messages, llmConfig, expertRoleId, dynamicContext, ragContext, identityPrompt, workRules, tools, locale, } = params;
     const orchestratorRole = ExpertRoleRegistry.get(expertRoleId);
     const isOrchestrator = orchestratorRole?.isOrchestrator ?? false;
     const activeRoleId = params.activeRoleId ?? expertRoleId;
@@ -86,8 +87,14 @@ export async function* runAgentLoop(params) {
             };
         }),
     ];
+    return { llmConfig, messages: openAIMessages, tools: allTools };
+}
+/** Internal single streaming loop; opaque provider causes never leave this boundary. */
+export async function* runPreparedAgentLoop(request, signal) {
     yield { type: "status", status: "thinking" };
-    const stream = streamChatCompletion(llmConfig, openAIMessages, signal, allTools);
+    const stream = request.outputTokens === undefined || request.outputTokens === request.llmConfig.maxOutputTokens
+        ? streamChatCompletion(request.llmConfig, request.messages, signal, request.tools)
+        : getLLMBackend(request.llmConfig).streamChat({ ...request.llmConfig, maxOutputTokens: request.outputTokens }, request.messages, signal, request.tools);
     let accumulatedToolCalls = [];
     for await (const chunk of stream) {
         if (signal?.aborted)
@@ -103,14 +110,22 @@ export async function* runAgentLoop(params) {
             case "done":
                 yield { type: "message_end", usage: chunk.usage };
                 return;
-            case "error":
-                yield { type: "error", message: chunk.message };
+            case "error": {
+                const { category, message, retryable } = normalizeError(chunk.error ?? chunk.message);
+                yield { type: "error", message: chunk.message, error: { category, message, retryable } };
                 return;
+            }
         }
     }
     if (accumulatedToolCalls.length > 0) {
         yield { type: "tool_calls_complete", toolCalls: accumulatedToolCalls };
     }
     yield { type: "message_end" };
+}
+/** Public compatibility wrapper keeps the original event shape exactly. */
+export async function* runAgentLoop(params) {
+    for await (const event of runPreparedAgentLoop(prepareAgentRequest(params), params.signal)) {
+        yield event.type === "error" ? { type: "error", message: event.message } : event;
+    }
 }
 //# sourceMappingURL=service.js.map

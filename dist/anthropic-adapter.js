@@ -1,3 +1,10 @@
+/** Shared transport boundary validation; invalid caps never reach a provider. */
+export function validateMaxOutputTokens(config) {
+    const cap = config.maxOutputTokens;
+    if (cap !== undefined && (!Number.isSafeInteger(cap) || cap <= 0)) {
+        throw new TypeError("maxOutputTokens must be a positive integer");
+    }
+}
 export function convertTools(tools) {
     return tools.map((t) => ({
         name: t.function.name,

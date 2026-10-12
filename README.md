@@ -10,6 +10,7 @@ Host-agnostic LLM agent engine with tool registry, streaming, and expert role or
 - **Skills** — Skill registry with prompt layers and tool refs
 - **MCP support** — Model Context Protocol tool provider integration
 - **Session management** — Multi-iteration agent loop with tool execution and failure recovery
+- **Durable runtime** — Injected session/artifact/ledger stores, validated resume and an optional IndexedDB adapter
 
 ## Install
 
@@ -111,9 +112,9 @@ backend or Tauri dependency is included.
 The main entry exports functional in-memory session, artifact and ledger stores,
 checkpoint/digest helpers, and versioned event/entry serialization contracts.
 The stores and serialization helpers remain available independently. Runtime
-0.5.0 now uses session history and checkpoints during runs; disk adapters and
-cross-process recovery remain later phases. The legacy session wrapper uses an
-isolated in-memory runtime while retaining its original event and callback API.
+0.6.0 uses session history, checkpoints, an execution ledger and cached artifacts
+for recovery. The legacy session wrapper keeps an isolated in-memory runtime
+and its original event and callback API.
 
 ```typescript
 import {
@@ -144,11 +145,11 @@ if (decoded?.type === "run_started") {
 - `InMemoryArtifactStore`: `put({ artifactId, sessionId, contentType, value })`,
   `get(artifactId)`, `list(sessionId)`. Values are strict JSON data, not media
   bytes. Global artifact IDs cannot be overwritten.
-- `InMemoryLedger`: `append`, `query(runId)`, `hasExecuted(toolCallId)`. Positive
-  safe-integer sequences strictly increase per run (gaps allowed). Only successful
-  tool executions mark the global replay query; this is not an executor lock or
-  automatic replay protection on its own.
-- `serializeAgentSessionEntry` / `parseAgentSessionEntry` validate all 16 kinds
+- `InMemoryLedger`: `append`, `query(runId)`, `hasExecuted(toolCallId)` and
+  `getToolExecution(toolCallId)`. Positive safe-integer sequences strictly increase
+  per run (gaps allowed). Global tool intent claims reject duplicate writers;
+  replay lookup prefers a successful execution, otherwise the latest intent/result.
+- `serializeAgentSessionEntry` / `parseAgentSessionEntry` validate all 17 kinds
   and nested typed fields. Serializing live errors removes opaque `cause`;
   parsing persisted causes or unknown kinds/fields rejects. Host code must still
   keep secrets out of prompt/result text and arbitrary tool data.
@@ -160,15 +161,16 @@ if (decoded?.type === "run_started") {
   UTF-8 FNV-1a32; UI IDs/timestamps/results are ignored. It is not a cryptographic
   integrity mechanism, and branching never restores a host project.
 - `AgentTool.annotations` carries read-only/destructive/idempotent/approval and
-  serial/parallel metadata without entering the LLM schema. Scheduling and
-  approval enforcement remain later phases.
+  serial/parallel metadata without entering the LLM schema. Execution is serial;
+  approval-sensitive calls fail before execution until the approval gate arrives.
 
-The memory stores are volatile. They do not claim persistence across process
-restarts or recovery of an interrupted run. Context types and
-`ProjectFactsDigest.producedBy: "host"` are frozen; there is no compaction engine
-yet. The reusable `./contract` suite will be published in its later design phase.
+The memory stores are volatile: reuse the same three instances for in-process
+resume, or inject durable stores for reload/process recovery. Runtime 0.7.0 builds
+token-budgeted projections and host-produced compaction summaries without changing
+the append-only log. Shared host storage probes live in
+`tests/contract/store-contract.ts`; the published `./contract` subpath remains a later phase.
 
-## Agent runtime (0.5.0)
+## Agent runtime (0.7.0)
 
 ```typescript
 import { createAgentRuntime, InMemorySessionStore } from "rimeagent";
@@ -195,8 +197,10 @@ for await (const event of runtime.run("Trim the first clip")) {
 const checkpoint = await runtime.checkpoint("after trim");
 ```
 
-Each run has an independent ID and increasing sequence. The same runtime instance
-rejects overlapping runs. `state` exposes idle/running/interrupted/settled;
+Each run has an independent ID. Events, checkpoints and ledger records share
+an increasing per-run sequence, so event sequences can have gaps. Resume retains
+the original runId and continues beyond every persisted sequence. The same runtime
+instance rejects overlapping runs. `state` exposes idle/running/interrupted/settled;
 `abort(reason?)`, a caller AbortSignal, or closing the generator interrupts the
 run. An already-started host tool cannot be forcibly stopped: the runtime waits
 for its result, records it, then stops without starting the next tool or request.
@@ -215,15 +219,159 @@ Prompt, locale, initial active role and role-switch tool definition are supporte
 Hooks provide dynamic/RAG/error-recovery context and optional model changes on
 role switching. `runAgentLoop()` remains the unchanged single-turn API.
 
-This version is not crash-recoverable. There is no `resume()` or
-`resolveApproval()` placeholder; those methods arrive with their real features.
-If an interrupted batch still has unresolved tool calls, a fresh run in the same
-session fails explicitly before requesting the model. History is not silently
-dropped; use a new session until durable recovery is implemented.
+An unfinished run must be continued with `resume(runId, signal?)`, not another
+`run()`. Invalid, stale, completed or failed runs reject without durable writes or
+model/tool calls. Resume verifies the checkpoint projection and, when bound, host
+project identity/revision. Completed ledger revisions can account for a tool
+committed immediately after the last checkpoint; unrelated host changes reject.
+Partial model text is not confirmed history and is requested again. A confirmed
+pending batch retains its original tool call IDs; a confirmed final response
+settles without another provider request. Credentials and full model config are
+not persisted; `onRoleSwitch` resolves the restored role's model configuration.
+Fresh runs reset the configured initial role/model; only resume restores that
+run's saved role override.
 New runtime tools marked destructive/requiresApproval/requiresConfirmation return
 a failure before execution; the existing session callback policy is untouched.
-Tool scheduling is serial. Compaction, output/artifact budgets, persistent ledger
-replay enforcement and durable adapters are not yet wired into execution.
+Tool scheduling is serial. Approval suspend/resume and parallel tool strategies
+remain unimplemented; no placeholder `resolveApproval()` is exported.
+
+## Durable Web stores and recovery
+
+```typescript
+import { createAgentRuntime } from "rimeagent";
+import { createIndexedDBStores } from "rimeagent/adapters/web";
+
+const stores = await createIndexedDBStores({ name: "editor-agent" });
+const runtime = createAgentRuntime({
+  sessionId, sessionStore: stores.sessionStore,
+  artifactStore: stores.artifactStore, ledger: stores.ledger,
+  llmConfig, expertRoleId: "general", tools: myTools,
+  hooks: {
+    getProjectFacts: () => ({
+      producedBy: "host", projectId: currentProjectId(),
+      projectRevision: currentProjectRevision(), digest: currentProjectDigest(),
+    }),
+  },
+});
+
+// Persist the runId received from run_started in the host's session UI state.
+for await (const event of runtime.resume(savedRunId)) handleEvent(event);
+stores.close();
+```
+
+Reopen the same database and session after reload and inject **all three stores**.
+Missing IndexedDB, blocked opens, schema errors, transaction aborts and quota
+failures reject; there is no automatic in-memory fallback. Writes resolve only
+after transaction commit. The root import does not load the IndexedDB adapter or
+AI SDK. The runtime uses `Array.findLast`; the Web adapter also requires
+`Promise.withResolvers` on its platform.
+Model-call accounting commits before confirmed assistant history, so a restart
+after confirmation cannot discard reported usage. Missing provider usage remains
+unknown rather than being reported as zero consumption.
+
+`createToolExecutor({sessionId, tools, ledger, artifactStore})` is also available
+for hosts needing the same serial durable execution policy. Its
+`execute(call, {runId, nextSeq, signal?})` requires a shared sequence allocator.
+Execution commits an intent before calling the host, then an immutable result
+artifact, then a `tool_exec` record, then the runtime's session result. Completed
+successes **and failures** replay their cached result without invoking the tool.
+Ledger records contain digests, not raw arguments/results. Optional
+`data.commandId`, `data.projectRevisionBefore` and `data.projectRevisionAfter`
+link the result to the host command log.
+
+An intent without a completed execution means the external effect is uncertain.
+Non-idempotent calls fail explicitly rather than execute again. Read-only or
+host-proven idempotent calls can retry and record that retry. A losing concurrent
+intent writer rejects. These rules prevent blind duplicate edits; they are not
+an exactly-once guarantee across a process crash between a host side effect and
+its durable result. The host must implement commandId idempotency/atomic commit
+for that window. Do not label a mutating tool idempotent without that guarantee.
+
+SQLite/file adapter requirements and the shared contract runner are documented
+in [design appendix E](docs/rimeagent-design.md#附录-e宿主-sqlitefile-适配与共用契约验证).
+
+## Context budgets, compaction and overflow recovery
+
+New runtime requests use `ContextManager` by default. Configure `context` to
+override token counting, window size, output reserve, compaction threshold and
+large-result limits:
+
+```typescript
+const runtime = createAgentRuntime({
+  sessionId, ...stores, llmConfig, expertRoleId: "general", tools: myTools,
+  context: {
+    contextTokens: 32768,
+    reserveOutputTokens: 4096,
+    compactTriggerRatio: 0.80,
+    maxToolResultTokens: 2048,
+    tokenizer: countTokens, // optional; default ceil(text.length / 4)
+  },
+  hooks: {
+    getProjectFacts: () => currentHostProjectFacts(),
+    summarizeContext: async ({ previousSummary, messages, projectFacts, signal }) => {
+      // Host implementation: preserve intent and references from messages and
+      // previousSummary. Return ContextSummary with every field below.
+      return await summarizeConversation({ previousSummary, messages, projectFacts, signal });
+    },
+    filterTools: (_tools, { activeRoleId }) => activeSkillToolRefs(activeRoleId),
+    buildRagContext: () => currentRetrievalContext(),
+  },
+});
+```
+
+`ContextSummary` requires `goal` (nonempty string) and string arrays
+`constraints`, `completedEdits`, `decisions`, `failedTools`, `openQuestions`,
+`nextSteps`, `references`. The summarizer belongs to the host; no built-in fake
+summary or hidden model call exists. Missing summarizer/current host facts/safe
+checkpoint means no compaction and no silent history deletion. Invalid summaries
+reject before compaction append. Signals must be honored by host async hooks.
+
+The default window is `llmConfig.contextLength ?? 32768`; the default output
+reserve is `min(4096, floor(window / 2))`. A request's effective output cap is
+`llmConfig.maxOutputTokens ?? reserveOutputTokens`; the runtime forwards it to
+the selected backend without changing backend predicate selection or mutating
+the original config. Tokens include system/context text, model-visible messages
+and tool schemas; an injected tokenizer must return nonnegative safe integers.
+Token estimates are not a provider billing guarantee.
+The runtime's final gate counts the prepared backend messages and filtered tool
+schemas, including the merged system layers, rather than trusting a pre-merge
+projection estimate alone.
+
+Compaction chooses a persisted checkpoint whose prefix has complete tool turns,
+keeps the latest user request and recent complete/pending tool batches, and
+appends a compaction entry with cumulative source IDs. Older history remains
+inspectable. Historical summaries and latest authoritative project facts are
+separate prompt layers, inserted before dynamic application context. Checkpoint
+digests still validate raw confirmed history, not changing projections or facts.
+Project identity/revision are rechecked after async preparation and before
+confirming a model response. A project change during streaming cannot be adopted
+as a new checkpoint and then used to execute a plan made for the old project;
+reported model usage is still recorded for that rejected plan.
+
+Large tool results retain their original JSON in an immutable artifact; projected
+tool messages contain bounded `success`, `message`, `artifactId` and the same
+toolCallId. Existing execution cache artifacts are reused. Missing/corrupt caches
+reject rather than silently reexecute tools. `createContextManager({sessionId,
+sessionStore, artifactStore, config?, summarize?})` also exposes
+`project({llmConfig, systemPrompt, tools, projectFacts?, forceCompact?, signal?})`,
+`countTokens(text)` and `getBudget(llmConfig)` independently of the runtime.
+
+Only normalized `context_overflow` triggers recovery. At the same iteration the
+runtime attempts forced compaction, halves the effective output cap, then filters
+tool definitions by `hooks.filterTools`' returned registered tool names. Hosts
+can derive this allowlist from active skills' `toolRefs`; an empty list removes
+all tools, including the role-switch tool. A missing hook leaves tools unchanged.
+There are at most three recovery attempts. Failed partial responses do not enter
+confirmed history and their tool calls are not executed. RAG/dynamic/error context
+is rebuilt before each attempt and after compaction. Storage failures propagate
+with the original exception on every attempt, including the last; ordinary
+provider errors do not acquire automatic retries.
+
+Exhausted overflow emits `error` and `run_interrupted` with cause
+`context_overflow`, saves recovery state, and leaves the same run resumable after
+the host adjusts context/model/hooks. It does not append `run_failed` or add a
+second user message on resume. Legacy `runAgentLoop`/`runAgentSession` retain their
+original event/projection policy rather than silently enabling compaction.
 
 ## Development
 

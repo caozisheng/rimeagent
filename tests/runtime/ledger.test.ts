@@ -274,4 +274,22 @@ describe("InMemoryLedger", () => {
 		await expect(ledger.query("")).rejects.toThrow();
 		await expect(ledger.hasExecuted("")).rejects.toThrow();
 	});
+ 
+	test("claims tool call intents globally and resolves successful execution first", async () => {
+		const ledger = new InMemoryLedger();
+		const intent: LedgerRecord = { runId: "run-1", seq: 1, ts: 0, event: { kind: "tool_intent", toolCallId: "call-global", tool: "edit", argsDigest: "digest-1" } };
+		await ledger.append(intent);
+		await expect(ledger.append({ ...intent, runId: "run-2", seq: 1 })).rejects.toThrow();
+		expect(await ledger.getToolExecution("call-global")).toEqual(intent);
+		const execution: LedgerRecord = { runId: "run-2", seq: 2, ts: 0, event: { kind: "tool_exec", toolCallId: "call-global", tool: "edit", argsDigest: "digest-1", outcome: "success", messageDigest: "m", artifactId: "artifact-1" } };
+		await ledger.append(execution);
+		expect(await ledger.getToolExecution("call-global")).toEqual(execution);
+	});
+
+	test("keeps successful execution dominant over later failure", async () => {
+		const ledger = new InMemoryLedger();
+		await ledger.append({ runId: "run-1", seq: 1, ts: 0, event: { kind: "tool_exec", toolCallId: "call-success", tool: "edit", argsDigest: "d", outcome: "success", messageDigest: "ok" } });
+		await ledger.append({ runId: "run-2", seq: 1, ts: 0, event: { kind: "tool_exec", toolCallId: "call-success", tool: "edit", argsDigest: "d", outcome: "failure", messageDigest: "failed" } });
+		expect((await ledger.getToolExecution("call-success"))?.event).toMatchObject({ outcome: "success" });
+	});
 });

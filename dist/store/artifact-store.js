@@ -1,7 +1,7 @@
 import { cloneJson, isJsonValue } from "./json";
 import { hasOnlyKeys, isId, isRecord } from "./validation";
 const ARTIFACT_KEYS = ["artifactId", "sessionId", "contentType", "value"];
-function isArtifact(value) {
+export function isArtifact(value) {
     return isRecord(value) && hasOnlyKeys(value, ARTIFACT_KEYS)
         && ARTIFACT_KEYS.every(key => Object.hasOwn(value, key))
         && isId(value.artifactId) && isId(value.sessionId) && isId(value.contentType)

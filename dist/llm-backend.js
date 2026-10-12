@@ -1,5 +1,6 @@
 import { normalizeError } from "./errors";
 import { streamAnthropicChat } from "./anthropic-backend";
+import { validateMaxOutputTokens } from "./anthropic-adapter";
 export function shouldUseDirect(config) {
     if (config.directMode !== undefined)
         return config.directMode;
@@ -22,6 +23,7 @@ export function resolveProvider(config) {
 export class RimeAgentBackend {
     type = "rimeagent";
     async *streamChat(config, messages, signal, tools) {
+        validateMaxOutputTokens(config);
         const direct = shouldUseDirect(config);
         // Only the native host speaks Anthropic here; third-party proxies stay OpenAI-compatible.
         if (resolveProvider(config) === "anthropic") {
@@ -43,6 +45,9 @@ export class RimeAgentBackend {
             const body = direct
                 ? { model: config.model, messages, stream: true }
                 : { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, messages };
+            if (config.maxOutputTokens !== undefined) {
+                body[direct ? "max_tokens" : "maxTokens"] = config.maxOutputTokens;
+            }
             if (tools && tools.length > 0) {
                 body.tools = tools;
                 if (direct)

@@ -6,6 +6,7 @@ export interface AgentSessionStore {
     saveCheckpoint(checkpoint: AgentCheckpoint): Promise<void>;
     listCheckpoints(sessionId: string): Promise<AgentCheckpoint[]>;
 }
+export declare function isCheckpoint(value: unknown): value is AgentCheckpoint;
 /** Append-only isolated history; checkpoint references do not restore projects. */
 export declare class InMemorySessionStore implements AgentSessionStore {
     private readonly sessions;

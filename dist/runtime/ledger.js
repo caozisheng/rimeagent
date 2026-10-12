@@ -2,12 +2,14 @@ import { cloneJson } from "../store/json";
 import { hasOnlyKeys, isCount, isId, isRecord, isTokenUsage } from "../store/validation";
 const eventKeys = {
     model_call: ["kind", "provider", "model", "requestIndex", "usage"],
+    tool_intent: ["kind", "toolCallId", "tool", "argsDigest"],
     tool_exec: [
         "kind", "toolCallId", "tool", "argsDigest", "outcome", "messageDigest",
         "artifactId", "commandId", "projectRevisionBefore", "projectRevisionAfter",
     ],
     retry: ["kind", "toolCallId", "attempt", "category"],
     approval: ["kind", "toolCallId", "decision"],
+    terminal: ["kind", "status"],
     compaction: ["kind", "detail"],
     cancellation: ["kind", "detail"],
 };
@@ -17,7 +19,7 @@ const errorCategories = {
     tool_failure: true,
     interrupted: true,
 };
-function isLedgerRecord(value) {
+export function isLedgerRecord(value) {
     if (!isRecord(value) || !hasOnlyKeys(value, ["runId", "seq", "ts", "event"])
         || !["runId", "seq", "ts", "event"].every(key => Object.hasOwn(value, key))
         || !isId(value.runId) || !isCount(value.seq) || value.seq === 0
@@ -32,6 +34,9 @@ function isLedgerRecord(value) {
             return ["provider", "model", "requestIndex", "usage"].every(key => Object.hasOwn(event, key))
                 && isId(event.provider) && isId(event.model) && isCount(event.requestIndex)
                 && isTokenUsage(event.usage);
+        case "tool_intent":
+            return ["toolCallId", "tool", "argsDigest"].every(key => Object.hasOwn(event, key))
+                && isId(event.toolCallId) && isId(event.tool) && isId(event.argsDigest);
         case "tool_exec":
             return ["toolCallId", "tool", "argsDigest", "outcome", "messageDigest"].every(key => Object.hasOwn(event, key))
                 && isId(event.toolCallId) && isId(event.tool) && isId(event.argsDigest)
@@ -45,6 +50,8 @@ function isLedgerRecord(value) {
         case "approval":
             return Object.hasOwn(event, "toolCallId") && Object.hasOwn(event, "decision") && isId(event.toolCallId)
                 && (event.decision === "allow" || event.decision === "deny" || event.decision === "suspend");
+        case "terminal":
+            return event.status === "completed" || event.status === "failed" || event.status === "interrupted";
         case "compaction":
         case "cancellation":
             return event.detail === undefined || typeof event.detail === "string";
@@ -59,6 +66,9 @@ function isLedgerRecord(value) {
 export class InMemoryLedger {
     recordsByRun = new Map();
     successfulToolCallIds = new Set();
+    successfulExecutions = new Map();
+    latestToolRecords = new Map();
+    claimedIntents = new Set();
     async append(record) {
         if (!isLedgerRecord(record))
             throw new TypeError("Invalid ledger record");
@@ -71,19 +81,36 @@ export class InMemoryLedger {
         if (previous && snapshot.seq <= previous.seq) {
             throw new Error("Ledger sequence must strictly increase within a run");
         }
+        if (snapshot.event.kind === "tool_intent" && this.claimedIntents.has(snapshot.event.toolCallId)) {
+            throw new Error("Tool call intent already claimed");
+        }
         // No await between validation and commit: failed appends cannot mutate either index.
         if (records)
             records.push(snapshot);
         else
             this.recordsByRun.set(snapshot.runId, [snapshot]);
-        if (snapshot.event.kind === "tool_exec" && snapshot.event.outcome === "success") {
-            this.successfulToolCallIds.add(snapshot.event.toolCallId);
+        if (snapshot.event.kind === "tool_intent") {
+            this.claimedIntents.add(snapshot.event.toolCallId);
+            this.latestToolRecords.set(snapshot.event.toolCallId, snapshot);
+        }
+        else if (snapshot.event.kind === "tool_exec") {
+            this.latestToolRecords.set(snapshot.event.toolCallId, snapshot);
+            if (snapshot.event.outcome === "success") {
+                this.successfulToolCallIds.add(snapshot.event.toolCallId);
+                this.successfulExecutions.set(snapshot.event.toolCallId, snapshot);
+            }
         }
     }
     async hasExecuted(toolCallId) {
         if (!isId(toolCallId))
             throw new TypeError("Invalid tool call id");
         return this.successfulToolCallIds.has(toolCallId);
+    }
+    async getToolExecution(toolCallId) {
+        if (!isId(toolCallId))
+            throw new TypeError("Invalid tool call id");
+        const record = this.successfulExecutions.get(toolCallId) ?? this.latestToolRecords.get(toolCallId);
+        return record ? cloneJson(record) : null;
     }
     async query(runId) {
         if (!isId(runId))

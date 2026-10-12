@@ -12,6 +12,11 @@ export interface LedgerRecord {
         requestIndex: number;
         usage: TokenUsage;
     } | {
+        kind: "tool_intent";
+        toolCallId: string;
+        tool: string;
+        argsDigest: string;
+    } | {
         kind: "tool_exec";
         toolCallId: string;
         tool: string;
@@ -32,6 +37,9 @@ export interface LedgerRecord {
         toolCallId: string;
         decision: ApprovalDecision;
     } | {
+        kind: "terminal";
+        status: "completed" | "failed" | "interrupted";
+    } | {
         kind: "compaction" | "cancellation";
         detail?: string;
     };
@@ -40,8 +48,11 @@ export interface RuntimeLedger {
     append(record: LedgerRecord): Promise<void>;
     /** Successful tool executions only; toolCallId is global across runs. */
     hasExecuted(toolCallId: string): Promise<boolean>;
+    /** Global replay lookup: successful execution dominates later failures. */
+    getToolExecution(toolCallId: string): Promise<LedgerRecord | null>;
     query(runId: string): Promise<LedgerRecord[]>;
 }
+export declare function isLedgerRecord(value: unknown): value is LedgerRecord;
 /**
  * Append-only in-memory history. Only allowlisted fields are accepted; supplied
  * digest/detail strings are not inspected for semantic secrets or redacted.
@@ -49,8 +60,12 @@ export interface RuntimeLedger {
 export declare class InMemoryLedger implements RuntimeLedger {
     private readonly recordsByRun;
     private readonly successfulToolCallIds;
+    private readonly successfulExecutions;
+    private readonly latestToolRecords;
+    private readonly claimedIntents;
     append(record: LedgerRecord): Promise<void>;
     hasExecuted(toolCallId: string): Promise<boolean>;
+    getToolExecution(toolCallId: string): Promise<LedgerRecord | null>;
     query(runId: string): Promise<LedgerRecord[]>;
 }
 //# sourceMappingURL=ledger.d.ts.map

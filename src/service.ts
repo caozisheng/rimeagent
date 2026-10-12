@@ -9,7 +9,20 @@ import type {
 import { ExpertRoleRegistry } from "./expert-roles";
 import type { PromptLayer } from "./prompt-builder";
 import { buildSystemPrompt } from "./prompt-builder";
-import { streamChatCompletion } from "./llm-client";
+import { getLLMBackend, streamChatCompletion } from "./llm-client";
+import type { NormalizedError } from "./errors";
+import { normalizeError } from "./errors";
+
+export interface PreparedAgentRequest {
+	llmConfig: AgentLLMConfig;
+	messages: OpenAIMessage[];
+	tools: ToolDefinition[];
+	/** Runtime budget override; routing still evaluates the original host config. */
+	outputTokens?: number;
+}
+
+export type PreparedAgentEvent = Exclude<AgentEvent, { type: "error" }>
+	| { type: "error"; message: string; error: NormalizedError };
 
 export const SWITCH_ROLE_TOOL_NAME = "switch_expert_role";
 
@@ -56,7 +69,7 @@ function buildDefaultSwitchRoleTool(): ToolDefinition {
 	};
 }
 
-export async function* runAgentLoop(params: RunAgentLoopParams): AsyncGenerator<AgentEvent> {
+export function prepareAgentRequest(params: RunAgentLoopParams): PreparedAgentRequest {
 	const {
 		messages,
 		llmConfig,
@@ -67,7 +80,6 @@ export async function* runAgentLoop(params: RunAgentLoopParams): AsyncGenerator<
 		workRules,
 		tools,
 		locale,
-		signal,
 	} = params;
 
 	const orchestratorRole = ExpertRoleRegistry.get(expertRoleId);
@@ -138,9 +150,17 @@ export async function* runAgentLoop(params: RunAgentLoopParams): AsyncGenerator<
 			}),
 	];
 
+	return { llmConfig, messages: openAIMessages, tools: allTools };
+}
+
+/** Internal single streaming loop; opaque provider causes never leave this boundary. */
+export async function* runPreparedAgentLoop(request: PreparedAgentRequest,
+	signal?: AbortSignal): AsyncGenerator<PreparedAgentEvent> {
 	yield { type: "status", status: "thinking" };
 
-	const stream = streamChatCompletion(llmConfig, openAIMessages, signal, allTools);
+	const stream = request.outputTokens === undefined || request.outputTokens === request.llmConfig.maxOutputTokens
+		? streamChatCompletion(request.llmConfig, request.messages, signal, request.tools)
+		: getLLMBackend(request.llmConfig).streamChat({ ...request.llmConfig, maxOutputTokens: request.outputTokens }, request.messages, signal, request.tools);
 
 	let accumulatedToolCalls: ToolCall[] = [];
 
@@ -158,9 +178,11 @@ export async function* runAgentLoop(params: RunAgentLoopParams): AsyncGenerator<
 			case "done":
 				yield { type: "message_end", usage: chunk.usage };
 				return;
-			case "error":
-				yield { type: "error", message: chunk.message };
+			case "error": {
+				const { category, message, retryable } = normalizeError(chunk.error ?? chunk.message);
+				yield { type: "error", message: chunk.message, error: { category, message, retryable } };
 				return;
+			}
 		}
 	}
 
@@ -168,4 +190,11 @@ export async function* runAgentLoop(params: RunAgentLoopParams): AsyncGenerator<
 		yield { type: "tool_calls_complete", toolCalls: accumulatedToolCalls };
 	}
 	yield { type: "message_end" };
+}
+
+/** Public compatibility wrapper keeps the original event shape exactly. */
+export async function* runAgentLoop(params: RunAgentLoopParams): AsyncGenerator<AgentEvent> {
+	for await (const event of runPreparedAgentLoop(prepareAgentRequest(params), params.signal)) {
+		yield event.type === "error" ? { type: "error", message: event.message } : event;
+	}
 }

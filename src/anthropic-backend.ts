@@ -1,6 +1,6 @@
 import type { AgentLLMConfig, OpenAIMessage, StreamChunk, ToolCall, ToolDefinition } from "./types";
 import { normalizeError } from "./errors";
-import { convertTools, convertMessages } from "./anthropic-adapter";
+import { convertTools, convertMessages, validateMaxOutputTokens } from "./anthropic-adapter";
 
 /** Internal Anthropic transport used by RimeAgentBackend. */
 export async function* streamAnthropicChat(
@@ -10,11 +10,12 @@ export async function* streamAnthropicChat(
 	signal?: AbortSignal,
 	tools?: ToolDefinition[],
 ): AsyncGenerator<StreamChunk> {
+		validateMaxOutputTokens(config);
 		const { system, messages: anthropicMessages } = convertMessages(messages);
 
 		const apiBody: Record<string, unknown> = {
 			model: config.model,
-			max_tokens: config.contextLength ?? 8192,
+			max_tokens: config.maxOutputTokens ?? config.contextLength ?? 8192,
 			stream: true,
 			messages: anthropicMessages,
 		};

@@ -1,11 +1,12 @@
 import { normalizeError } from "./errors";
-import { convertTools, convertMessages } from "./anthropic-adapter";
+import { convertTools, convertMessages, validateMaxOutputTokens } from "./anthropic-adapter";
 /** Internal Anthropic transport used by RimeAgentBackend. */
 export async function* streamAnthropicChat(config, messages, direct, signal, tools) {
+    validateMaxOutputTokens(config);
     const { system, messages: anthropicMessages } = convertMessages(messages);
     const apiBody = {
         model: config.model,
-        max_tokens: config.contextLength ?? 8192,
+        max_tokens: config.maxOutputTokens ?? config.contextLength ?? 8192,
         stream: true,
         messages: anthropicMessages,
     };

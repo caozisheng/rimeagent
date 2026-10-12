@@ -7,6 +7,8 @@ export interface AgentLLMConfig {
     model: string;
     provider?: LLMProvider;
     contextLength?: number;
+    /** Effective request output cap; absent preserves the transport's default. */
+    maxOutputTokens?: number;
     supportsToolCalls?: boolean;
     /** When true, bypass the proxy and call the LLM API directly from the client. */
     directMode?: boolean;

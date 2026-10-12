@@ -17,15 +17,18 @@ interface StoredSession {
 	checkpoints: AgentCheckpoint[];
 }
 
-const CHECKPOINT_KEYS = ["checkpointId", "sessionId", "parentId", "createdAt", "entrySeq", "contextDigest", "label"];
+const CHECKPOINT_KEYS = ["checkpointId", "sessionId", "parentId", "createdAt", "entrySeq", "contextDigest", "label", "runId", "seq", "projectId", "projectRevision", "projectCheckpointId"];
 const REQUIRED_CHECKPOINT_KEYS = ["checkpointId", "sessionId", "createdAt", "entrySeq", "contextDigest"];
 
-function isCheckpoint(value: unknown): value is AgentCheckpoint {
+export function isCheckpoint(value: unknown): value is AgentCheckpoint {
 	return isRecord(value) && hasOnlyKeys(value, CHECKPOINT_KEYS)
 		&& REQUIRED_CHECKPOINT_KEYS.every(key => Object.hasOwn(value, key))
 		&& isId(value.checkpointId) && isId(value.sessionId) && isId(value.contextDigest)
 		&& (!Object.hasOwn(value, "parentId") || value.parentId === undefined || isId(value.parentId))
 		&& (value.label === undefined || typeof value.label === "string")
+		&& ["runId", "projectId", "projectCheckpointId"].every(key => value[key] === undefined || isId(value[key]))
+		&& (value.seq === undefined || (isCount(value.seq) && value.seq > 0))
+		&& (value.projectRevision === undefined || isCount(value.projectRevision))
 		&& typeof value.createdAt === "number" && Number.isFinite(value.createdAt) && value.createdAt >= 0
 		&& isCount(value.entrySeq);
 }

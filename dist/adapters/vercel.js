@@ -1,5 +1,6 @@
 import { jsonSchema, streamText } from "ai";
 import { normalizeError } from "../errors";
+import { validateMaxOutputTokens } from "../anthropic-adapter";
 function convertMessages(messages) {
     const names = new Map();
     return messages.map((message) => {
@@ -59,6 +60,7 @@ export class VercelAIBackend {
         this.resolveModel = resolveModel;
     }
     async *streamChat(config, messages, signal, tools) {
+        validateMaxOutputTokens(config);
         const controller = new AbortController();
         const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
         try {
@@ -88,7 +90,8 @@ export class VercelAIBackend {
                 sdkTools[tool.name] = { description: tool.description, inputSchema: jsonSchema(tool.parameters) };
             }
             const result = streamText({ model, system, messages: systemCount ? converted.slice(systemCount) : converted, abortSignal: requestSignal,
-                tools: sdkTools, maxRetries: 0, onError: () => { } });
+                tools: sdkTools, maxRetries: 0, onError: () => { },
+                ...(config.maxOutputTokens === undefined ? {} : { maxOutputTokens: config.maxOutputTokens }) });
             const indices = new Map();
             const calls = new Map();
             let metadata;

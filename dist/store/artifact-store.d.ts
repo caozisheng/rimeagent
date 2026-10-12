@@ -10,6 +10,7 @@ export interface AgentArtifactStore {
     get(artifactId: string): Promise<AgentArtifact | null>;
     list(sessionId: string): Promise<AgentArtifact[]>;
 }
+export declare function isArtifact(value: unknown): value is AgentArtifact;
 /** Immutable JSON artifact storage. Media bytes belong to the host, not this store. */
 export declare class InMemoryArtifactStore implements AgentArtifactStore {
     private readonly artifacts;

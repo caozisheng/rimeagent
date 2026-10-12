@@ -105,6 +105,16 @@ export type AgentSessionEntry = {
     ts: number;
     runId: string;
     usage: TokenUsage;
+} | {
+    kind: "run_state";
+    id: string;
+    ts: number;
+    runId: string;
+    seq: number;
+    iteration: number;
+    phase: "model" | "tools" | "settled";
+    activeRoleId: string;
+    checkpointId?: string;
 };
 export interface AgentSessionSnapshot {
     readonly sessionId: string;

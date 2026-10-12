@@ -74,10 +74,16 @@ export type { AgentCheckpoint, AgentCheckpointRef, AgentBranch } from "./store/c
 export { InMemoryArtifactStore } from "./store/artifact-store";
 export type { AgentArtifact, AgentArtifactStore } from "./store/artifact-store";
 export type { JsonValue } from "./store/json";
-export { InMemoryLedger } from "./runtime/ledger";
+export { InMemoryLedger, isLedgerRecord } from "./runtime/ledger";
 export type { ApprovalDecision, LedgerRecord, RuntimeLedger } from "./runtime/ledger";
-export type { ContextManagerConfig, ContextProjection, ProjectFactsDigest } from "./runtime/context-manager";
+export { createToolExecutor } from "./runtime/executor";
+export type { ToolExecutor, ToolExecutorOptions, ToolExecutorContext } from "./runtime/executor";
+export { createContextManager } from "./runtime/context-manager";
+export type {
+	ContextManagerConfig, ContextProjection, ProjectFactsDigest, ContextManager, ContextManagerOptions,
+	ContextProjectInput, ContextBudget, ContextSummary, SummarizeContextInput, ContextSummarizer,
+} from "./runtime/context-manager";
 
-// Agent run lifecycle (Phase 3)
+// Agent run lifecycle, durable recovery and context management (Phase 3–5)
 export { createAgentRuntime } from "./runtime/runtime";
 export type { AgentRuntime, AgentRuntimeConfig, AgentRuntimeState } from "./runtime/runtime";

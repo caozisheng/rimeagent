@@ -10,6 +10,11 @@ export interface AgentCheckpoint {
 	readonly entrySeq: number;
 	readonly contextDigest: string;
 	readonly label?: string;
+	readonly runId?: string;
+	readonly seq?: number;
+	readonly projectId?: string;
+	readonly projectRevision?: number;
+	readonly projectCheckpointId?: string;
 }
 
 export interface AgentCheckpointRef {

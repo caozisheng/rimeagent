@@ -3,7 +3,7 @@
   "compilerOptions": {
     "noEmit": true,
     "rootDir": ".",
-    "lib": ["ES2022", "ESNext.Promise", "DOM", "DOM.Iterable"],
+    "lib": ["ES2022", "ES2023.Array", "ESNext.Promise", "DOM", "DOM.Iterable"],
     "types": ["bun"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"]

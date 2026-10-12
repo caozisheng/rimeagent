@@ -1,6 +1,6 @@
 {
   "name": "rimeagent",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "private": false,
   "description": "Host-agnostic LLM agent engine with tool registry, streaming, and expert role orchestration",
   "type": "module",
@@ -15,6 +15,10 @@
     "./backends/vercel": {
       "types": "./dist/adapters/vercel.d.ts",
       "import": "./dist/adapters/vercel.js"
+    },
+    "./adapters/web": {
+      "types": "./dist/adapters/indexeddb.d.ts",
+      "import": "./dist/adapters/indexeddb.js"
     }
   },
   "files": [
@@ -45,6 +49,7 @@
     "@ai-sdk/provider": "^2",
     "@types/bun": "^1.4.2",
     "ai": "^5",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "^5.8.3"
   },
   "keywords": [

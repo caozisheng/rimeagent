@@ -1,4 +1,12 @@
-import type { OpenAIMessage, ToolDefinition } from "./types";
+import type { AgentLLMConfig, OpenAIMessage, ToolDefinition } from "./types";
+
+/** Shared transport boundary validation; invalid caps never reach a provider. */
+export function validateMaxOutputTokens(config: AgentLLMConfig): void {
+	const cap = config.maxOutputTokens;
+	if (cap !== undefined && (!Number.isSafeInteger(cap) || cap <= 0)) {
+		throw new TypeError("maxOutputTokens must be a positive integer");
+	}
+}
 
 export interface AnthropicContentBlock {
 	type: "text" | "tool_use" | "tool_result";

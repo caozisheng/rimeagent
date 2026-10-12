@@ -30,6 +30,7 @@ const ENTRY_KEYS: Record<string, readonly string[]> = {
 	run_failed: ["kind", "id", "ts", "runId", "error"],
 	error: ["kind", "id", "ts", "error"],
 	usage: ["kind", "id", "ts", "runId", "usage"],
+	run_state: ["kind", "id", "ts", "runId", "seq", "iteration", "phase", "activeRoleId", "checkpointId"],
 };
 
 function ownDescriptor(value: object, key: string): PropertyDescriptor | undefined {
@@ -198,6 +199,9 @@ export function isAgentSessionEntry(value: unknown): value is AgentSessionEntry 
 			case "run_failed": return required(value, "runId", isId) && required(value, "error", isNormalizedError);
 			case "error": return required(value, "error", isNormalizedError);
 			case "usage": return required(value, "runId", isId) && required(value, "usage", isTokenUsage);
+			case "run_state": return required(value, "runId", isId) && required(value, "seq", item => isCount(item) && item > 0)
+				&& required(value, "iteration", isCount) && required(value, "activeRoleId", isId)
+				&& required(value, "phase", item => item === "model" || item === "tools" || item === "settled") && optional(value, "checkpointId", isId);
 			default: return false;
 		}
 	} catch {

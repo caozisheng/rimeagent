@@ -2,7 +2,7 @@
 
 > **Status**: Accepted — 2026-10-08 · Rev3 2026-10-11（排期重排：VercelAIBackend 前置 Phase 1；runner 顺延 Phase 2–6；NativeLLMBackend 移出排期转附录 C）
 > **基线**: rimeagent `v0.1.0` @ `f30d9cb`（17 文件 / 1,398 行，源码核对）
-> **实施进度（2026-10-11）**：Phase 0/1 已提交 `394ee50` 并合入远端；Phase 2 契约 + Phase 3 循环下沉已实施，包版本准备为 `0.5.0`（未发布、未打 tag）。`bun test` 300 项通过，`bun run typecheck` / `npm run build` 通过；真实本地 HTTP/SSE runtime 冒烟覆盖工具调用→串行宿主执行→模型后续回答→history/checkpoint/终态，提前关闭流观察到 HTTP 取消与 run_interrupted 落 store；兼容回调 Date/扩展 metadata/取消同时抛错、完成消息提前关闭、存储失败和 provider cleanup 失败均有行为回归。Phase 4–8 尚未实施，不具备跨进程 resume/compaction/完整审批；NativeLLMBackend 明确不做。clean-room 记录与审计清单已完成，宿主负责人签字待补；未更改宿主 pin 或代验真实编辑任务。
+> **实施进度（2026-10-12）**：Phase 0/1 已提交 `394ee50` 并合入远端；Phase 2/3 已提交本地 `e78e684`；Phase 4/5 引擎侧交付已实施，包版本准备为 `0.7.0`（未提交本增量、未发布、未打 tag）。`bun test` 421 项通过，typecheck / 完整 build / core-only build 通过。真实 HTTP/SSE + Chromium IndexedDB 连续完成55工具轮次，4次 compaction；大结果原值保留artifact、模型只见摘要；最新facts-revision-55仍在请求头部。真实400 context_overflow 观察到 compaction→输出128降64→工具允许列表缩小，成功后只执行1次工具；压缩会话中断→刷新→同runId恢复，副作用计数57不变，key不落三件套。独立审查的项目 binding、最终 token 门禁与最后尝试存储错误三项均有 failing-before/passing-after 回归；构建产物冒烟验证旧项目计划零执行且保留真实模型用量。Phase 6–8 尚未实施；NativeLLMBackend 明确不做。宿主SQLite/file与真实编辑任务仍由宿主仓验收，未更改pin或代签验收。
 > **上游决策**:
 > - `rimecut-public/docs/rimecut-feature-dev-rimeagent-design.md` §12（Durable Agent Runtime 决策版，2026-10-08）
 > - `rimecut-public/docs/rimecut-cli-for-agent.md` v3（§D5/D6：内置 agent 快路径、harness 方法、parity 已验收项）
@@ -738,12 +738,26 @@ Phase 3 实施冻结补充（2026-10-11）：
 | 4.1 entries 落盘 | `src/runtime/runtime.ts` | run 全生命周期 entry 追加（§5.1 全 kind）；每 iteration 边界 flush | 断电模拟（强杀 generator）后 store 状态一致 |
 | 4.2 durable boundary | `src/runtime/runtime.ts` | checkpoint 自动生成策略：每 iteration 结束 + approval suspend 时；`contextDigest` 校验 | `tests/runtime/resume.test.ts` |
 | 4.3 `resume()` | `src/runtime/runtime.ts` | 载入 session → 校验 `AgentCheckpointRef.projectRevision`（mismatch → 结构化错误，不变量 3/4）→ 从 seq 重建状态继续 | 中断→恢复→完成的端到端 mock 测试；revision mismatch 拒绝恢复 |
-| 4.4 重放保护 | `src/runtime/executor.ts`（初版顺序执行） | 执行前 `ledger.hasExecuted(toolCallId)`；命中→返回缓存摘要，不重执行 | 恢复场景中非幂等工具恰好执行一次（计数断言） |
+| 4.4 重放保护 | `src/runtime/executor.ts`（顺序执行） | durable intent→artifact→tool_exec→session result；`getToolExecution` 命中返回缓存结果，未完成非幂等 intent 阻断 | 已提交副作用不重放；不确定副作用不盲重试 |
 | 4.5 ledger 记录 | `src/runtime/ledger.ts` | model_call / tool_exec（含 commandId、revision before/after——由 `AgentToolResult.data` 增可选字段透出）/ retry / 终态 | `tests/runtime/ledger-e2e.test.ts` |
-| 4.6 IndexedDB adapter | `src/adapters/indexeddb.ts`、`package.json` exports | `./adapters/web`：SessionStore/ArtifactStore/Ledger 的 IndexedDB 实现；主入口零 DOM | bun test（happy-dom 或 jsdom devDep）round-trip |
+| 4.6 IndexedDB adapter | `src/adapters/indexeddb.ts`、`package.json` exports | `./adapters/web`：SessionStore/ArtifactStore/Ledger 的 IndexedDB 实现；主入口零 DOM | fake-indexeddb round-trip/事务故障/并发；真实 Chromium 刷新恢复 |
 | 4.7 Tauri 适配指引 | `docs/rimeagent-design.md` 附录 | SQLite/file adapter 由宿主实现（rimecut 仓）；本仓只验收契约 contract test 复用 | 宿主 adapter 通过同一 contract test 套件 |
 
 **Phase 4 出口**：刷新/重启后对话可恢复；无重复非幂等 command。
+
+Phase 4 实施冻结补充（2026-10-11）：
+
+- runtime config 新增可注入 `ledger` / `artifactStore`（未传为 InMemory，跨实例恢复必须复用同一持久化三件套），`hooks.getProjectFacts()` 返回当前宿主事实。`resume(runId,signal?)` 以同一 runId、最大已落盘 seq 继续，不重加用户消息；新 `run()` 不自动接管未结束 run。run_state entry 记录每个 outward event 的 seq、iteration/phase/activeRoleId、最近 checkpoint；无 apiKey/完整 LLM config。role 模型覆盖恢复由宿主 hook 重新解析。
+- checkpoint additive 保存 projectId/projectRevision/projectCheckpointId；恢复必须验证 checkpoint 边界投影 digest 与当前 session head，拒绝旧 run 已被新会话推进、已完成 run、未知 run。启用 host facts 时 checkpoint 绑定当前 revision；缺失 facts hook 或 revision/projectId 不匹配产生结构化错误，不执行工具或模型，不自动覆盖宿主项目。
+- 部分 confirmed tool batch 恢复先完成仍待执行的同一 toolCallId，再请求模型；已成功调用缓存 artifact 中的结果，禁止重做。工具执行前持久化 `tool_intent` ledger，成功结果先写 artifact 再写 tool_exec ledger 再写 session tool_result。非幂等 intent 无完成记录视作副作用不确定：resume 明确失败，绝不盲重试；readOnly/idempotent 可恢复重试并记 retry。宿主需 commandId 幂等解决进程死在外部副作用与 engine durable commit 之间的窗口，不能承诺任意宿主工具 exactly-once。
+- RuntimeLedger 增 `getToolExecution(toolCallId)` 查询最后 intent/exec（成功 exec 优先），其判别联合增加 tool_intent（toolCallId/tool/argsDigest）、terminal（completed/failed/interrupted），与现有 query/hasExecuted 兼容。缓存结果只走 artifact，ledger 不放原始 arguments/result/credentials。失败调用也有确定结果，resume 不反复纠正同一已完成失败调用；后续模型可生成新 toolCallId。
+- IndexedDB 子路径 `./adapters/web` 导出 `createIndexedDBStores({name?,indexedDB?})`，返回 sessionStore/artifactStore/ledger/close；三个 store 共享数据库。追加/唯一性/seq/parent 验证在读写 transaction 内完成，await resolve 以 transaction commit 为准；拒绝配额/打开/blocked 错误，不静默退回易失内存。宿主可显式选择 InMemory 且负责展示持久化不可用告警。核心入口不导入 DOM/IndexedDB adapter。
+- provider retry/approval suspend/compaction 不在本阶段提前实现；无对应 entry 伪造。宿主 SQLite/file 采用同一 store/ledger/artifact 不变量与恢复场景验证，原生 LLM backend 仍明确不做。
+- Phase 4 验证出口：`tests/runtime/resume.test.ts` / `ledger-e2e.test.ts` / `executor.test.ts` / `model-boundary.test.ts`、`tests/adapters/indexeddb*.test.ts` 与 `tests/contract/store-contract.test.ts` 已覆盖恢复、持久化故障与双句柄竞争。共享 contract runner 对 InMemory 与 IndexedDB 运行同一套探针；宿主 SQLite/file 尚未代验。
+- crash suffix 恢复仅接受 checkpoint 后刚提交的单条 confirmed assistant，或具备 matching ledger artifact 的 tool_result；不接纳新增 user message。checkpoint 后已完成工具的连续 revision before/after 链可解释当前 host revision，否则拒绝。事件、checkpoint、ledger 共用 seq，因此 outward event 的 seq 允许间隙。
+- model_call 用量必须先 commit，再 append confirmed assistant；确认消息已落盘而 message_end 尚未发出时重启，不得永久丢失本次模型账目。缺省 usage 表示未知（空对象），不能伪造 0 token 消耗。
+- fresh run 从 config.activeRoleId/expertRoleId 与 config.llmConfig 初始化，不继承上一个 run 的 role/model override；resume 才从该 run 的 cursor 与宿主 hook 重建覆盖。
+
 
 ### 7.6 Phase 5：上下文管理（3 周 → v0.7.0）
 
@@ -757,6 +771,18 @@ Phase 3 实施冻结补充（2026-10-11）：
 | 5.6 RAG hooks 迁移 | `src/runtime/runtime.ts` | ragContext/errorRecovery 改由 hooks 在新请求/tool failure/role switch/compaction 后重建；`runAgentLoop` 参数保留（内部桥接） | 行为等价 + 重建时机断言 |
 
 **Phase 5 出口**：长会话超 50 turn 仍能继续；项目事实不丢失。
+Phase 5 实施冻结补充（2026-10-12）：
+
+- 新 runtime 默认在每次模型请求前构建 ContextProjection；旧 runAgentLoop/runAgentSession 兼容路径保留原始投影与事件行为。checkpoint digest 继续验证完整 confirmed history，compaction 只改模型投影，不改 entries 或把动态 facts 混入恢复 hash。
+- `context?: ContextManagerConfig` 与 `hooks.summarizeContext` 接入。摘要使用结构化八字段：goal、constraints、completedEdits、decisions、failedTools、openQuestions、nextSteps、references；无 hook/当前宿主 facts/安全切点时不伪造摘要或静默丢历史。安全切点来自已持久化 checkpoint，不能切开 assistant toolCalls/results，保留最新用户请求与最近完整工具轮次；多次 compaction 累积来源 ID 并向 summarize hook 提供上一摘要。
+- 超大 tool result 的原值保留于 immutable artifact；模型仅见保留 success/message 的有界摘要与 artifactId，toolCallId 不变。重复投影/恢复复用 artifact；旧历史不删改。token 计量包含 system prompt、模型可见消息和工具 schemas；tokenizer 非负整数校验，缺省 ceil(chars/4)。预算缺省 contextLength 或32768，输出预留4096（小窗口自动限至窗口一半），比例0.80，大结果上限2048。
+- 每次请求读取 `getProjectFacts()` 最新值，事实与历史摘要独立标注；事实优先级25，在 dynamic context（30）之前。RAG/error recovery 在新请求、角色切换、工具失败与 compaction 后重建。摘要不是宿主事实，不替代 revision 校验。
+- overflow 只处理归一化 context_overflow：同 iteration 最多3次恢复，依次强制 compaction→降低输出预算→宿主 `filterTools` 返回 skill.toolRefs 允许列表缩工具面；provider/权限/网络错误不自动重试。`AgentLLMConfig.maxOutputTokens?` 由各已实施 backend 真实透传。尝试期间 partial assistant 不入 confirmed history，不执行失败请求中的 tool calls。
+- 分级恢复耗尽时写 error + run_interrupted（cause=context_overflow）与可恢复 cursor/checkpoint，不写不可恢复 run_failed；resume 仍沿同 runId/seq。缺少 filter hook 不凭空推断领域工具，保留工具面并在仍溢出时显式中断。NativeLLMBackend、审批策略、工具并发仍排除。
+- Phase 5 验证出口：`context-projection.test.ts` / `compaction.test.ts` / `context-runtime.test.ts` / `context-safety.test.ts` / `overflow-kernel.test.ts` 与 backend output-budget 覆盖投影、超50轮、持久化摘要、tool atoms、artifact、分级恢复、取消/存储故障和旧 session parity。checkpoint 安全切点扫描只计算一次 message prefix counts，并仅 hash 最终选中边界，避免长会话多 checkpoint 的重复前缀计算。
+- 新 runtime 有效输出上限为显式 maxOutputTokens 或输出 reserve，所有 backend 真实传递。backend predicate 仍针对宿主原始 config 选路，之后再传预算覆盖的请求副本；不修改宿主 config，旧兼容入口缺省 transport body 不变。
+- Phase 5 审查修正：最终 token 门禁针对实际 prepared messages（含合并后的 system 层）与过滤后的 tool schemas；投影估算不替代最终门禁。每次 preparation exception 在归一化之前检查持久化故障，包含最后尝试，原异常不得变成 provider overflow 中断。模型 streaming/异步上下文构建期间宿主项目变更必须在 confirmed assistant 与 provider/tool 边界再次验证旧 project binding，不得先重新 checkpoint 接纳新 revision 再执行旧计划；已完成模型请求的实际用量先记账，不因计划被拒而消失。
+
 
 ### 7.7 Phase 6：审批与执行策略（2.5 周 → v0.8.0）
 
@@ -839,7 +865,7 @@ v0.2.0 ──► v0.3.0 ──► v0.4.0 ──► v0.5.0 ──► v0.6.0 ─�
 | 引擎从 1.4K 膨胀为难维护框架 | 中 | 领域内容拒之门外（§3.2）；单文件 ≤400 行；每 Phase 出口条件独立可验 |
 | AGPL 源码误复制 | 高 | §3.3 clean-room 规则成文（任务 0.9）+ 7.3 审计；仅行为参考 |
 | chars/4 token 近似导致 compaction 时机漂移 | 低 | `compactTriggerRatio` 0.80 留 20% 余量；tokenizer 注入可精确化；overflow recovery 兜底 |
-| IndexedDB 在隐私模式/配额下不可用 | 中 | 契约化——宿主可换 SQLite/file adapter；`./adapters/web` 内部降级到 InMemory 并显式事件告警（不静默） |
+| IndexedDB 在隐私模式/配额下不可用 | 中 | adapter 拒绝打开/写入错误，不自动降级；宿主显式选择 InMemory 或 SQLite/file，并展示持久化不可用告警 |
 | 兼容层长期滞留成双实现 | 中 | D10 明确退场时点（1.0.0 后一个大版本）；每 Phase 减薄一层 |
 | rimecraft 接入时 API 漂移 | 高 | contract test 套件导出（6.3）供双仓共用；版本协商靠事件 `v` + semver |
 | 审批跨进程重启的状态机复杂度 | 高 | 状态全部落盘为 entry（§5.1 approval/run_awaiting_approval kind），resume 是纯投影重建，无独立内存状态机 |
@@ -895,7 +921,15 @@ export type { ContextManagerConfig, ContextProjection, ProjectFactsDigest } from
 // Phase 3+ 新增（v0.5.0 起 · runtime 主入口）
 export type { AgentRuntimeConfig, AgentRuntime, AgentRuntimeState } from "./runtime/runtime";
 export { createAgentRuntime } from "./runtime/runtime";
-// Phase 4/6: actual execution/approval strategies add their APIs when implemented.
+// Phase 4 新增（v0.6.0 · durable serial executor；已实施）
+export { isLedgerRecord } from "./runtime/ledger";
+export { createToolExecutor } from "./runtime/executor";
+export type { ToolExecutor, ToolExecutorOptions, ToolExecutorContext } from "./runtime/executor";
+// Phase 5 新增（v0.7.0 · context projection；已实施）
+export { createContextManager } from "./runtime/context-manager";
+export type { ContextManager, ContextManagerOptions, ContextProjectInput, ContextBudget,
+  ContextSummary, SummarizeContextInput, ContextSummarizer } from "./runtime/context-manager";
+// Phase 6 计划新增（策略/审批；尚未导出）
 export type { ToolExecutorConfig } from "./runtime/executor";
 export type { ApprovalGate, PreflightDecision, ToolCallContext } from "./runtime/approval";
 export { createDefaultApprovalGate } from "./runtime/approval";
@@ -966,5 +1000,36 @@ export { createDefaultApprovalGate } from "./runtime/approval";
 **1.0.0 后**：可选切 npm `^1.0.0`（任务 8.4），摆脱手工 pin；在此之前版本节奏即 pin 节奏（§4.3 版本表 = 宿主 re-pin 时刻表）。
 
 ---
+
+## 附录 E：宿主 SQLite/file 适配与共用契约验证
+
+**交付边界**：宿主实现 `AgentSessionStore` / `AgentArtifactStore` / `RuntimeLedger`，并将同一持久化三件套注入 runtime。本仓不添加 Tauri/SQLite 依赖，不实现 NativeLLMBackend，不将宿主适配器称为已验收。`hooks.getProjectFacts()` 必须读取当前真实项目；engine checkpoint/branch 不执行项目 rollback。
+
+### E.1 SQLite 最小存储约束
+
+| 数据 | 必须保持的不变量 |
+|---|---|
+| Session entries | `(sessionId, entryId)` 唯一；独立 append position 保持提交顺序；只追加，返回隔离快照；使用 entry serializer 排除 opaque error cause |
+| Checkpoints | checkpointId 全局唯一；parent 必须同 session 且已存在；parent.entrySeq≤entrySeq≤已提交 entries 数；boundary0 root 可建立空 session；保存 runId/seq/project 绑定 |
+| Artifacts | artifactId 全局唯一、不可覆盖；严格 JSON、不可持有 media bytes；按 session 的插入顺序返回 |
+| Ledger | `(runId,seq)` 唯一且 seq 为严格递增正安全整数，允许间隙；tool_intent 的 toolCallId 全局唯一；成功 exec 优先，其他 lookup 返回最后 intent/exec |
+| Commit | 校验、唯一性 claim、记录和顺序/index 元数据在同一事务；rollback 不占用 ID、不增加 seq；Promise resolve 必须晚于 COMMIT，磁盘/锁/配额错误原样拒绝 |
+
+多连接写入不能以进程内 Map/先 SELECT 后另起事务替代全局约束。SQLite 应在写事务内查询最新边界并 INSERT 约束记录；事务失败回滚所有索引。ledger 不持有原始 arguments/results；工具结果放 immutable artifact，仅以 artifactId 关联。
+
+### E.2 File adapter 原子边界
+
+file 实现必须提供跨实例 writer exclusion、append-only journal 与可验证 commit 边界。完成记录和唯一性/seq 元数据须由同一 journal commit 原子发布；等待 flush/fsync 后才 resolve。重启只忽略未完成的尾部事务，不能把完整但损坏的记录当空 session，也不能在磁盘错误后返回内存成功。单纯 `read JSON → 改写 JSON` 不满足 append/全局 intent claim/多 writer 契约。文件路径、加密与宿主项目 persistence 由宿主持有。
+
+### E.3 共用探针与宿主恢复验收
+
+`tests/contract/store-contract.ts` 提供无 bun:test 依赖的 `runStoreContract(factory)`；factory 每次返回空的新三件套，可带 close。宿主测试可从 engine 工作区直接导入它并传入自己的 SQLite/file factory；`./contract` npm 子路径尚未发布。`tests/contract/store-contract.test.ts` 示范同一 runner 验证 InMemory 与 IndexedDB。探针检查：append identity/order/隔离、checkpoint ancestry/boundary、artifact immutable JSON、ledger seq/global intent/replay、错误隐私和并发 claim rollback。仅通过探针不替代宿主领域恢复测试。
+
+宿主必须再跑真实重启场景：partial provider 输出重启；confirmed 两工具 batch 执行第一条后退出；tool_exec 已 commit 而 session result 未 append；只有 intent 的非幂等调用；checkpoint digest/projectId/revision mismatch；旧/完成 run 拒绝；同 runId/seq 与 role model 重建；副作用和 commandId 计数。使用 `tests/adapters/indexeddb-resume.test.ts` / `tests/runtime/resume.test.ts` 的同一故障窗口与断言，而非独立放宽的宿主测试。
+
+host side effect 与 engine result commit 之间存在跨存储 crash window。宿主 commandId 幂等与领域事务必须解决这个窗口；annotations.idempotent 只能用于真实可重放工具。engine 的非幂等 intent-only 阻断避免重复写，但不伪称任意外部副作用 exactly-once，也不自动重试 provider、创建审批决策或恢复项目。
+
+---
+
 
 *维护约定：本文随每个 Phase 出口更新状态与差异；行为级变更（契约、不变量、门禁）必须先改本文再改代码。*

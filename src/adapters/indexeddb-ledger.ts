@@ -1,0 +1,79 @@
+import type { LedgerRecord, RuntimeLedger } from "../runtime/ledger";
+import type { IndexedDBHandle } from "./indexeddb-database";
+import { isLedgerRecord } from "../runtime/ledger";
+import { cloneJson } from "../store/json";
+import { isId } from "../store/validation";
+import { request } from "./indexeddb-database";
+
+type LedgerKey = [string, number];
+interface RunMetadata { runId: string; seq: number }
+interface ToolClaim {
+	toolCallId: string;
+	intent?: LedgerKey;
+	latest?: LedgerKey;
+	successful?: LedgerKey;
+}
+
+export class IndexedDBLedger implements RuntimeLedger {
+	constructor(private readonly handle: IndexedDBHandle) {}
+
+	async append(record: LedgerRecord): Promise<void> {
+		if (!isLedgerRecord(record)) throw new TypeError("Invalid ledger record");
+		const snapshot = cloneJson(record);
+		if (!isLedgerRecord(snapshot)) throw new TypeError("Invalid normalized ledger record");
+		await this.handle.transaction(["runs", "ledger", "claims"], "readwrite", async transaction => {
+			const runs = transaction.objectStore("runs");
+			const previous: RunMetadata | undefined = await request(runs.get(snapshot.runId));
+			if (previous && snapshot.seq <= previous.seq) throw new Error("Ledger sequence must strictly increase within a run");
+			const event = snapshot.event;
+			if (event.kind === "tool_intent" || event.kind === "tool_exec") {
+				const claims = transaction.objectStore("claims");
+				const claim: ToolClaim = await request(claims.get(event.toolCallId)) ?? { toolCallId: event.toolCallId };
+				const key: LedgerKey = [snapshot.runId, snapshot.seq];
+				if (event.kind === "tool_intent") {
+					if (claim.intent) throw new Error("Duplicate global tool intent");
+					claim.intent = key;
+				} else {
+					if (event.outcome === "success") claim.successful = key;
+				}
+				claim.latest = key;
+				await request(claims.put(claim));
+			}
+			await request(runs.put({ runId: snapshot.runId, seq: snapshot.seq } satisfies RunMetadata));
+			await request(transaction.objectStore("ledger").add(snapshot));
+		});
+	}
+
+	async hasExecuted(toolCallId: string): Promise<boolean> {
+		if (!isId(toolCallId)) throw new TypeError("Invalid tool call id");
+		return this.handle.transaction(["claims"], "readonly", async transaction => {
+			const claim: ToolClaim | undefined = await request(transaction.objectStore("claims").get(toolCallId));
+			return claim?.successful !== undefined;
+		});
+	}
+
+	async getToolExecution(toolCallId: string): Promise<LedgerRecord | null> {
+		if (!isId(toolCallId)) throw new TypeError("Invalid tool call id");
+		return this.handle.transaction(["claims", "ledger"], "readonly", async transaction => {
+			const claim: ToolClaim | undefined = await request(transaction.objectStore("claims").get(toolCallId));
+			const key = claim?.successful ?? claim?.latest ?? claim?.intent;
+			if (!key) return null;
+			const value: unknown = await request(transaction.objectStore("ledger").get(key));
+			if (!isLedgerRecord(value)) throw new TypeError("Invalid persisted execution record");
+			return cloneJson(value);
+		});
+	}
+
+	async query(runId: string): Promise<LedgerRecord[]> {
+		if (!isId(runId)) throw new TypeError("Invalid run id");
+		return this.handle.transaction(["ledger"], "readonly", async transaction => {
+			const records: unknown[] = await request(transaction.objectStore("ledger").index("run").getAll(runId));
+			const result: LedgerRecord[] = [];
+			for (const record of records) {
+				if (!isLedgerRecord(record)) throw new TypeError("Invalid persisted ledger record");
+				result.push(cloneJson(record));
+			}
+			return result;
+		});
+	}
+}
