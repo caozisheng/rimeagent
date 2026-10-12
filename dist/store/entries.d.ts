@@ -36,6 +36,12 @@ export type AgentSessionEntry = {
     ts: number;
     toolCallId: string;
     reason: string;
+    runId?: string;
+    argsDigest?: string;
+    projectId?: string;
+    projectRevision?: number;
+    proposalDigest?: string;
+    artifactId?: string;
 } | {
     kind: "approval_resolved";
     id: string;
@@ -43,6 +49,16 @@ export type AgentSessionEntry = {
     toolCallId: string;
     decision: "allow" | "deny";
     by: "user" | "policy";
+    runId?: string;
+    note?: string;
+    proposalDigest?: string;
+} | {
+    kind: "proposal";
+    id: string;
+    ts: number;
+    toolCallId: string;
+    proposalDigest: string;
+    artifactId: string;
 } | {
     kind: "compaction";
     id: string;

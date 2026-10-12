@@ -10,13 +10,52 @@ export async function* runSessionIterations(params, config, hooks = {}) {
     let iterationOffset = hooks.initialState?.iterationOffset ?? 0;
     let iterations = iterationOffset;
     async function* executeBatch(calls) {
+        const approval = await hooks.beforeToolBatch?.(calls);
+        if (approval) {
+            for (const event of approval)
+                yield event;
+            return "awaiting_approval";
+        }
         const failures = [...lastIterationFailures];
-        for (const call of calls) {
+        for (let index = 0; index < calls.length; index++) {
+            const call = calls[index];
+            if (hooks.onToolBatch && hooks.parallelTool?.(call)) {
+                if (params.signal?.aborted)
+                    return "complete";
+                let end = index + 1;
+                while (end < calls.length && hooks.parallelTool(calls[end]))
+                    end++;
+                const group = calls.slice(index, end);
+                for (const item of group)
+                    await hooks.onToolStart?.(item);
+                if (params.signal?.aborted)
+                    return "complete";
+                const results = await hooks.onToolBatch(group);
+                if (results.length > group.length)
+                    throw new Error("Tool batch returned excess results");
+                for (let offset = 0; offset < results.length; offset++) {
+                    const item = group[offset];
+                    const result = results[offset];
+                    if (!result.success)
+                        failures.push({ toolName: item.function.name, errorMessage: result.message });
+                    const message = { id: `tool-${nanoid()}`, role: "tool", toolCallId: item.id, content: JSON.stringify(result), createdAt: Date.now() };
+                    allMessages.push(message);
+                    await hooks.onMessage?.(message);
+                }
+                if (params.signal?.aborted)
+                    return "complete";
+                if (results.length !== group.length)
+                    throw new Error("Tool batch returned incomplete results without cancellation");
+                for (let offset = 0; offset < results.length; offset++)
+                    yield { kind: "tool_result", toolCall: group[offset], result: results[offset] };
+                index = end - 1;
+                continue;
+            }
             if (params.signal?.aborted)
-                return;
+                return "complete";
             await hooks.onToolStart?.(call);
             if (params.signal?.aborted)
-                return;
+                return "complete";
             if (call.function.name === SWITCH_ROLE_TOOL_NAME) {
                 let args = {};
                 try {
@@ -32,7 +71,7 @@ export async function* runSessionIterations(params, config, hooks = {}) {
                 allMessages.push(message);
                 await hooks.onMessage?.(message);
                 if (params.signal?.aborted)
-                    return;
+                    return "complete";
                 yield { kind: "role_switch", roleId: activeRoleId };
                 continue;
             }
@@ -47,15 +86,17 @@ export async function* runSessionIterations(params, config, hooks = {}) {
             allMessages.push(message);
             await hooks.onMessage?.(message);
             if (params.signal?.aborted)
-                return;
+                return "complete";
             if (!hooks.legacyToolResults)
                 yield { kind: "tool_result", toolCall: call, result };
         }
         lastIterationFailures = failures;
+        return "complete";
     }
     if (hooks.initialState?.pendingToolCalls?.length) {
         iterations = iterationOffset + 1;
-        yield* executeBatch(hooks.initialState.pendingToolCalls);
+        if ((yield* executeBatch(hooks.initialState.pendingToolCalls)) === "awaiting_approval")
+            return { reason: "awaiting_approval", iterations };
         if (params.signal?.aborted)
             return { reason: "interrupted", iterations };
         yield { kind: "iteration_end", iteration: iterationOffset };
@@ -118,7 +159,8 @@ export async function* runSessionIterations(params, config, hooks = {}) {
                         return { reason: params.signal?.aborted ? "interrupted" : "response", iterations };
                     }
                     lastIterationFailures = [];
-                    yield* executeBatch(pendingToolCalls);
+                    if ((yield* executeBatch(pendingToolCalls)) === "awaiting_approval")
+                        return { reason: "awaiting_approval", iterations };
                     if (params.signal?.aborted)
                         return { reason: "interrupted", iterations };
                     assistantContent = "";

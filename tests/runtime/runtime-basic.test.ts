@@ -69,7 +69,7 @@ test("a fresh run does not send unresolved tool-call history to the provider", a
 	} finally { dispose(); }
 });
 
-test("new runtime does not execute approval-sensitive tools before a gate exists", async () => {
+test("new runtime durably suspends approval-sensitive tools without executing them", async () => {
 	const llmConfig: AgentLLMConfig = { baseUrl: "https://approval.test", apiKey: "key", model: "model" };
 	let executions = 0;
 	const dispose = registerLLMBackendFor(c => c === llmConfig, { type: "approval", async *streamChat(): AsyncGenerator<StreamChunk> {
@@ -83,8 +83,9 @@ test("new runtime does not execute approval-sensitive tools before a gate exists
 		const events = [];
 		for await (const event of runtime.run("delete")) events.push(event);
 		expect(executions).toBe(0);
-		const result = events.find(event => event.type === "tool_result");
-		expect(result?.payload.result.success).toBe(false);
+		expect(events.at(-1)?.type).toBe("run_awaiting_approval");
+		expect(events.some(event => event.type === "tool_result")).toBe(false);
+		expect(runtime.state).toBe("awaiting_approval");
 	} finally { dispose(); }
 });
 

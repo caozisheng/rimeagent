@@ -31,7 +31,7 @@ export interface LedgerRecord {
 		}
 		| { kind: "retry"; toolCallId?: string; attempt: number; category: AgentErrorCategory }
 		| { kind: "approval"; toolCallId: string; decision: ApprovalDecision }
-		| { kind: "terminal"; status: "completed" | "failed" | "interrupted" }
+		| { kind: "terminal"; status: "completed" | "failed" | "interrupted" | "awaiting_approval" }
 		| { kind: "compaction" | "cancellation"; detail?: string };
 }
 
@@ -97,7 +97,7 @@ export function isLedgerRecord(value: unknown): value is LedgerRecord {
 			return Object.hasOwn(event, "toolCallId") && Object.hasOwn(event, "decision") && isId(event.toolCallId)
 				&& (event.decision === "allow" || event.decision === "deny" || event.decision === "suspend");
 		case "terminal":
-			return event.status === "completed" || event.status === "failed" || event.status === "interrupted";
+			return event.status === "completed" || event.status === "failed" || event.status === "interrupted" || event.status === "awaiting_approval";
 		case "compaction":
 		case "cancellation":
 			return event.detail === undefined || typeof event.detail === "string";

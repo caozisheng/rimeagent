@@ -3,6 +3,7 @@ import { normalizeError } from "../errors";
 import { computeContextDigest } from "../store/checkpoint";
 import { canonicalJson, cloneJson } from "../store/json";
 import { isCount, isId, isRecord, isToolCall, isToolResult } from "../store/validation";
+import { validateProposalDecision } from "./approval";
 const textEncoder = new TextEncoder();
 const TOOL_RESULT_CONTENT_TYPE = "application/json";
 function failure(message) {
@@ -53,6 +54,16 @@ function validateResultMetadata(result) {
 function replayError(message, toolName) {
     throw normalizeError(new Error(message), { toolName });
 }
+export class ApprovalRequiredError extends Error {
+    toolCall;
+    decision;
+    constructor(toolCall, decision) {
+        super(decision.reason);
+        this.name = "ApprovalRequiredError";
+        this.toolCall = toolCall;
+        this.decision = decision;
+    }
+}
 export function createToolExecutor(options) {
     if (!isId(options.sessionId))
         throw new TypeError("Invalid session id");
@@ -60,6 +71,41 @@ export function createToolExecutor(options) {
     for (const tool of options.tools)
         tools.set(tool.name, tool);
     let tail = Promise.resolve();
+    const preflight = async (call, context) => {
+        if (isToolCall(call)) {
+            let completed;
+            try {
+                completed = await options.ledger.getToolExecution(call.id);
+            }
+            catch (cause) {
+                context.onPersistenceFailure?.();
+                throw cause;
+            }
+            if (completed?.event.kind === "tool_exec") {
+                if (completed.event.tool !== call.function.name || completed.event.argsDigest !== argsDigest(call))
+                    replayError("Tool call id was reused with different arguments", call.function.name);
+                // Policy controls new effects, never rewrites an already committed outcome.
+                return { action: "allow" };
+            }
+        }
+        const persisted = context.approvalDecisions?.[call.id];
+        if (persisted === "allow")
+            return { action: "allow" };
+        if (persisted === "deny")
+            return { action: "deny" };
+        if (!options.approval) {
+            const annotations = tools.get(call.function.name)?.annotations;
+            return annotations?.requiresApproval || annotations?.destructive ? { action: "suspend", reason: "Tool requires approval" } : { action: "allow" };
+        }
+        const facts = context.projectFacts?.();
+        return validateProposalDecision(await options.approval.preflight({
+            runId: context.runId,
+            toolCall: call,
+            ...(tools.get(call.function.name)?.annotations === undefined ? {} : { annotations: tools.get(call.function.name).annotations }),
+            ...(facts?.projectId === undefined ? {} : { projectId: facts.projectId }),
+            ...(facts === undefined ? {} : { projectRevision: facts.projectRevision }),
+        }));
+    };
     const readCachedResult = async (record) => {
         if (record.event.kind !== "tool_exec" || !record.event.artifactId) {
             throw new Error("Tool execution has no cached artifact");
@@ -74,7 +120,7 @@ export function createToolExecutor(options) {
         }
         return cloneJson(artifact.value);
     };
-    const executeOne = async (call, context) => {
+    const executeOne = async (call, context, approvalAllowed) => {
         if (context.signal?.aborted)
             return failure("Operation was aborted");
         if (!isToolCall(call) || !isId(context.runId))
@@ -94,7 +140,7 @@ export function createToolExecutor(options) {
             if (prior.event.kind === "tool_exec")
                 return readCachedResult(prior);
             const annotations = tool?.annotations;
-            if (!tool || annotations?.requiresApproval || annotations?.destructive || tool.requiresConfirmation) {
+            if (!tool || tool.requiresConfirmation || ((tool.annotations?.requiresApproval || tool.annotations?.destructive) && !approvalAllowed)) {
                 return failure("Tool requires approval");
             }
             if (!(annotations?.readOnly || annotations?.idempotent)) {
@@ -110,7 +156,7 @@ export function createToolExecutor(options) {
         else {
             if (!tool)
                 return failure(`Unknown tool: ${call.function.name}`);
-            if (tool.annotations?.requiresApproval || tool.annotations?.destructive || tool.requiresConfirmation) {
+            if (tool.requiresConfirmation || ((tool.annotations?.requiresApproval || tool.annotations?.destructive) && !approvalAllowed)) {
                 return failure("Tool requires approval");
             }
             // A losing concurrent writer keeps the durable claim error. It must not guess
@@ -138,11 +184,61 @@ export function createToolExecutor(options) {
         await options.ledger.append({ runId: context.runId, seq: context.nextSeq(), ts: Date.now(), event });
         return cloneJson(result);
     };
+    const executeBatch = async (calls, context) => {
+        const decisions = await Promise.all(calls.map(call => preflight(call, context)));
+        for (let index = 0; index < calls.length; index++) {
+            const decision = decisions[index];
+            if (decision.action === "suspend")
+                throw new ApprovalRequiredError(calls[index], decision);
+        }
+        const results = new Array(calls.length);
+        const approvalAllowed = (index) => decisions[index].action === "allow" && (options.approval !== undefined || context.approvalDecisions?.[calls[index].id] === "allow");
+        const isParallelRead = (call) => {
+            const annotations = tools.get(call.function.name)?.annotations;
+            return options.executor?.parallelReadOnly === true && call.function.name !== "undo" && call.function.name !== "redo" && call.function.name !== "restore"
+                && annotations?.readOnly === true && annotations.executionMode === "parallel";
+        };
+        for (let index = 0; index < calls.length;) {
+            if (context.signal?.aborted)
+                return results.slice(0, index);
+            if (decisions[index].action === "deny") {
+                results[index++] = failure("approval_denied");
+                continue;
+            }
+            if (!isParallelRead(calls[index])) {
+                results[index] = await executeOne(calls[index], context, approvalAllowed(index));
+                index++;
+                continue;
+            }
+            const group = [];
+            const ids = new Set();
+            while (index < calls.length && decisions[index].action === "allow" && isParallelRead(calls[index]) && !ids.has(calls[index].id)) {
+                group.push(index);
+                ids.add(calls[index].id);
+                index++;
+            }
+            const settled = await Promise.allSettled(group.map(item => executeOne(calls[item], context, approvalAllowed(item))));
+            const rejected = settled.find((item) => item.status === "rejected");
+            if (rejected)
+                throw rejected.reason;
+            for (let item = 0; item < group.length; item++)
+                results[group[item]] = settled[item].value;
+            if (context.signal?.aborted)
+                return results.slice(0, index);
+        }
+        return results;
+    };
+    const schedule = (calls, context) => {
+        const result = tail.then(() => executeBatch(calls, context));
+        tail = result.then(() => undefined, () => undefined);
+        return result;
+    };
     return {
-        execute(call, context) {
-            const result = tail.then(() => executeOne(call, context));
-            tail = result.then(() => undefined, () => undefined);
-            return result;
+        preflight,
+        executeBatch: schedule,
+        async execute(call, context) {
+            const results = await schedule([call], context);
+            return results[0] ?? failure("Operation was aborted");
         },
     };
 }

@@ -1,10 +1,11 @@
 import type { AgentMessage, ToolCall, TokenUsage } from "../types";
 import type { AgentRuntimeEventPayload } from "../events";
 import type { AgentSessionConfig, AgentSessionParams, ToolFailureRecord } from "../session";
+import type { AgentToolResult } from "../tool-types";
 import type { PreparedAgentRequest, RunAgentLoopParams } from "../service";
 import type { NormalizedError } from "../errors";
 export interface IterationOutcome {
-    reason: "response" | "max_iterations" | "error" | "interrupted";
+    reason: "response" | "max_iterations" | "error" | "interrupted" | "awaiting_approval";
     iterations: number;
     errorMessage?: string;
     error?: NormalizedError;
@@ -35,6 +36,9 @@ export interface IterationHooks {
     onPreparationError?: (cause: unknown) => void;
     onMessage?: (message: AgentMessage, usage?: TokenUsage) => Promise<void>;
     onToolStart?: (toolCall: ToolCall) => Promise<void>;
+    beforeToolBatch?: (calls: readonly ToolCall[]) => Promise<readonly AgentRuntimeEventPayload[] | undefined>;
+    parallelTool?: (call: ToolCall) => boolean;
+    onToolBatch?: (calls: readonly ToolCall[]) => Promise<readonly AgentToolResult[]>;
     initialState?: InitialIterationState;
     /** Internal compatibility policy: deliver callbacks before JSON history conversion. */
     legacyToolResults?: boolean;

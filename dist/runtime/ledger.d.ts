@@ -38,7 +38,7 @@ export interface LedgerRecord {
         decision: ApprovalDecision;
     } | {
         kind: "terminal";
-        status: "completed" | "failed" | "interrupted";
+        status: "completed" | "failed" | "interrupted" | "awaiting_approval";
     } | {
         kind: "compaction" | "cancellation";
         detail?: string;

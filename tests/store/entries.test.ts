@@ -20,6 +20,7 @@ const entries: AgentSessionEntry[] = [
   { kind: "tool_result", id: "e4", ts: 3, toolCallId: "call-1", result, artifactId: "artifact-1" },
   { kind: "approval_requested", id: "e5", ts: 4, toolCallId: "call-1", reason: "destructive" },
   { kind: "approval_resolved", id: "e6", ts: 5, toolCallId: "call-1", decision: "allow", by: "policy" },
+  { kind: "proposal", id: "e18", ts: 16, toolCallId: "call-1", proposalDigest: "proposal-digest", artifactId: "proposal-artifact" },
   { kind: "compaction", id: "e7", ts: 6, summary: "summary", compactedEntryIds: ["e1", "e2"], projectDigest: digest },
   { kind: "checkpoint", id: "e8", ts: 7, checkpointId: "cp-1", projectRevision: 3 },
   { kind: "branch", id: "e9", ts: 8, fromCheckpointId: "cp-1", branchId: "branch-1" },
@@ -76,7 +77,7 @@ describe("session entries", () => {
     { seq: 0 }, { seq: -1 }, { seq: 0.5 }, { iteration: -1 }, { iteration: 0.5 },
     { phase: "unknown" }, { activeRoleId: "" }, { runId: "" }, { checkpointId: "" },
   ])("rejects corrupt durable run cursors: %j", changes => {
-    expect(isAgentSessionEntry({ ...entries[16], ...changes })).toBe(false);
+    expect(isAgentSessionEntry({ ...entries.find(entry => entry.kind === "run_state")!, ...changes })).toBe(false);
   });
 
   test("exotic array prototypes are rejected consistently by guards and persistence", () => {

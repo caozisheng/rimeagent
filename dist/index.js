@@ -16,8 +16,9 @@ export { InMemorySessionStore } from "./store/session-store";
 export { computeContextDigest } from "./store/checkpoint";
 export { InMemoryArtifactStore } from "./store/artifact-store";
 export { InMemoryLedger, isLedgerRecord } from "./runtime/ledger";
-export { createToolExecutor } from "./runtime/executor";
+export { createToolExecutor, ApprovalRequiredError } from "./runtime/executor";
+export { createDefaultApprovalGate, computeProposalDigest, validateProposalDecision } from "./runtime/approval";
 export { createContextManager } from "./runtime/context-manager";
-// Agent run lifecycle, durable recovery and context management (Phase 3–5)
+// Agent run lifecycle, durable recovery, context and approvals (Phase 3–6)
 export { createAgentRuntime } from "./runtime/runtime";
 //# sourceMappingURL=index.js.map

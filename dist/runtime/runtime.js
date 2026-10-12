@@ -11,6 +11,8 @@ import { assertNewRun, loadResumeState, rejectRecovery } from "./recovery";
 import { createRuntimeRequestContext } from "./request-context";
 import { InMemoryLedger } from "./ledger";
 import { createToolExecutor } from "./executor";
+import { createDefaultApprovalGate } from "./approval";
+import { createRuntimeApproval } from "./approval-controller";
 function createRuntime(config, compatibility) {
     if (!compatibility && (!config.sessionId || !config.expertRoleId))
         throw new TypeError("Runtime requires sessionId and expertRoleId");
@@ -20,7 +22,12 @@ function createRuntime(config, compatibility) {
     const history = new RuntimeHistory(config.sessionStore, config.sessionId);
     const ledger = config.ledger ?? new InMemoryLedger();
     const artifactStore = config.artifactStore ?? new InMemoryArtifactStore();
-    const executor = createToolExecutor({ sessionId: config.sessionId, tools: config.tools, ledger, artifactStore });
+    const gate = config.approval ?? createDefaultApprovalGate();
+    const executor = createToolExecutor({ sessionId: config.sessionId, tools: config.tools, ledger, artifactStore,
+        approval: gate, executor: config.executor });
+    let approvalFailures = 0;
+    const approval = createRuntimeApproval({ sessionId: config.sessionId, sessionStore: config.sessionStore, artifactStore, ledger, history, executor, gate,
+        facts: config.hooks?.getProjectFacts, onPersistenceFailure: () => { approvalFailures++; } });
     const registry = createToolRegistry();
     for (const tool of config.tools) {
         if (registry.get(tool.name))
@@ -43,6 +50,7 @@ function createRuntime(config, compatibility) {
         const previousState = state;
         const runId = resumeId ?? nanoid();
         const persistenceFailures = history.persistenceFailures;
+        const priorApprovalFailures = approvalFailures;
         let ledgerFailed = false;
         let seq = 0;
         let iteration = 0;
@@ -52,6 +60,7 @@ function createRuntime(config, compatibility) {
         let terminal = false;
         let lastCheckpoint;
         let iterator;
+        let approvalDecisions = Object.create(null);
         const nextSeq = () => ++seq;
         // Message hooks can settle the phase while the iteration generator is suspended.
         const hasSettledResponse = () => phase === "settled";
@@ -169,7 +178,7 @@ function createRuntime(config, compatibility) {
                 maxIterations,
                 async onToolCall(call) {
                     try {
-                        return await executor.execute(call, { runId, nextSeq, signal });
+                        return await executor.execute(call, { runId, nextSeq, signal, approvalDecisions });
                     }
                     catch (cause) {
                         // Executor persistence errors must remain rejected, not a false completion.
@@ -199,6 +208,31 @@ function createRuntime(config, compatibility) {
                     beforeRequest: requestContext?.prepare,
                     onContextOverflow: requestContext?.recover,
                     onPreparationError: requestContext?.guardPreparationError,
+                    beforeToolBatch: compatibility ? undefined : async (calls) => {
+                        await assertHostBoundary();
+                        const ready = await approval.prepare(calls, { runId, nextSeq, signal, recordLedger, projectFacts: config.hooks?.getProjectFacts,
+                            onPersistenceFailure: () => { ledgerFailed = true; },
+                            checkpoint: async () => { await assertHostBoundary(); return boundary(); } });
+                        if (ready.status === "awaiting_approval")
+                            return ready.events;
+                        approvalDecisions = ready.decisions;
+                        await assertHostBoundary();
+                        return undefined;
+                    },
+                    parallelTool: compatibility || !config.executor?.parallelReadOnly ? undefined : call => {
+                        const annotations = registry.get(call.function.name)?.annotations;
+                        return annotations?.readOnly === true && annotations.executionMode === "parallel"
+                            && call.function.name !== "undo" && call.function.name !== "redo" && call.function.name !== "restore" && call.function.name !== "switch_expert_role";
+                    },
+                    onToolBatch: compatibility ? undefined : async (calls) => {
+                        try {
+                            return await executor.executeBatch(calls, { runId, nextSeq, signal, approvalDecisions });
+                        }
+                        catch (cause) {
+                            ledgerFailed = true;
+                            throw cause;
+                        }
+                    },
                     onMessage: async (message, usage) => {
                         if (!compatibility && message.role === "assistant") {
                             await recordLedger({ kind: "model_call", provider: llmConfig.provider ?? "openai", model: llmConfig.model,
@@ -237,6 +271,10 @@ function createRuntime(config, compatibility) {
                     },
                     onToolStart: async (call) => {
                         await assertHostBoundary();
+                        if (!compatibility) {
+                            await approval.assertBinding(call, runId);
+                            await assertHostBoundary();
+                        }
                         await boundary();
                         const argsDigest = computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [call] }]);
                         await history.append({ kind: "tool_call", toolCallId: call.id, name: call.function.name, argsDigest });
@@ -266,9 +304,20 @@ function createRuntime(config, compatibility) {
                         }
                         await boundary();
                     }
+                    if ("kind" in payload && payload.kind === "run_awaiting_approval") {
+                        phase = "tools";
+                        await recordLedger({ kind: "terminal", status: "awaiting_approval" });
+                        const waiting = await event(payload);
+                        terminal = true;
+                        state = "awaiting_approval";
+                        yield waiting;
+                        return;
+                    }
                     yield await event(payload);
                 }
             }
+            if (outcome.reason === "awaiting_approval")
+                return;
             if (signal.aborted || outcome.reason === "interrupted") {
                 yield await interrupt();
                 return;
@@ -302,7 +351,7 @@ function createRuntime(config, compatibility) {
                 state = previousState;
                 throw cause;
             }
-            if (history.persistenceFailures !== persistenceFailures || ledgerFailed) {
+            if (history.persistenceFailures !== persistenceFailures || ledgerFailed || approvalFailures !== priorApprovalFailures) {
                 terminal = true;
                 state = "settled";
                 if (started) {
@@ -373,6 +422,11 @@ function createRuntime(config, compatibility) {
         get state() { return state; },
         run: (message, signal) => execute(message, undefined, signal),
         resume: (runId, signal) => execute(undefined, runId, signal),
+        async resolveApproval(toolCallId, decision, note) {
+            if (active)
+                throw new Error("Cannot resolve approval while a run is active");
+            await approval.resolve(toolCallId, decision, note);
+        },
         checkpoint: label => activeCheckpoint ? activeCheckpoint(label) : history.checkpoint(label),
         abort(reason) { active?.abort(reason); },
     };

@@ -18,8 +18,9 @@ const ENTRY_KEYS: Record<string, readonly string[]> = {
 	assistant_message: ["kind", "id", "ts", "content", "toolCalls", "usage"],
 	tool_call: ["kind", "id", "ts", "toolCallId", "name", "argsDigest"],
 	tool_result: ["kind", "id", "ts", "toolCallId", "result", "artifactId"],
-	approval_requested: ["kind", "id", "ts", "toolCallId", "reason"],
-	approval_resolved: ["kind", "id", "ts", "toolCallId", "decision", "by"],
+	approval_requested: ["kind", "id", "ts", "toolCallId", "reason", "runId", "argsDigest", "projectId", "projectRevision", "proposalDigest", "artifactId"],
+	approval_resolved: ["kind", "id", "ts", "toolCallId", "decision", "by", "runId", "note", "proposalDigest"],
+	proposal: ["kind", "id", "ts", "toolCallId", "proposalDigest", "artifactId"],
 	compaction: ["kind", "id", "ts", "summary", "compactedEntryIds", "projectDigest"],
 	checkpoint: ["kind", "id", "ts", "checkpointId", "projectRevision"],
 	branch: ["kind", "id", "ts", "fromCheckpointId", "branchId"],
@@ -186,8 +187,11 @@ export function isAgentSessionEntry(value: unknown): value is AgentSessionEntry 
 			case "assistant_message": return required(value, "content", item => typeof item === "string") && optional(value, "toolCalls", isToolCalls) && optional(value, "usage", isTokenUsage);
 			case "tool_call": return required(value, "toolCallId", isId) && required(value, "name", isId) && required(value, "argsDigest", isId);
 			case "tool_result": return required(value, "toolCallId", isId) && required(value, "result", isToolResult) && optional(value, "artifactId", isId);
-			case "approval_requested": return required(value, "toolCallId", isId) && required(value, "reason", item => typeof item === "string");
-			case "approval_resolved": return required(value, "toolCallId", isId) && required(value, "decision", item => item === "allow" || item === "deny") && required(value, "by", item => item === "user" || item === "policy");
+			case "approval_requested": return required(value, "toolCallId", isId) && required(value, "reason", item => typeof item === "string")
+				&& ["runId", "argsDigest", "projectId", "proposalDigest", "artifactId"].every(key => optional(value, key, isId)) && optional(value, "projectRevision", isCount);
+			case "approval_resolved": return required(value, "toolCallId", isId) && required(value, "decision", item => item === "allow" || item === "deny") && required(value, "by", item => item === "user" || item === "policy")
+				&& optional(value, "runId", isId) && optional(value, "note", item => typeof item === "string") && optional(value, "proposalDigest", isId);
+			case "proposal": return required(value, "toolCallId", isId) && required(value, "proposalDigest", isId) && required(value, "artifactId", isId);
 			case "compaction": return required(value, "summary", item => typeof item === "string") && required(value, "compactedEntryIds", item => isArrayOf(item, isId)) && required(value, "projectDigest", isProjectFacts);
 			case "checkpoint": return required(value, "checkpointId", isId) && optional(value, "projectRevision", isCount);
 			case "branch": return required(value, "fromCheckpointId", isId) && required(value, "branchId", isId);

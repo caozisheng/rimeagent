@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createAgentRuntime } from "../../src/runtime/runtime";
-import type { AgentRuntimeConfig } from "../../src/runtime/runtime";
+import type { AgentRuntimeConfig } from "../../src/runtime/contracts";
 import { InMemorySessionStore } from "../../src/store/session-store";
 import { computeContextDigest } from "../../src/store/checkpoint";
 import { InMemoryArtifactStore } from "../../src/store/artifact-store";

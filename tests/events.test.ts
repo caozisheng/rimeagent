@@ -12,6 +12,7 @@ const payloads: AgentRuntimeEventPayload[] = [
 	{ type: "error", message: "offline" }, { type: "status", status: "thinking" },
 	{ kind: "tool_result", toolCall: { id: "call", type: "function", function: { name: "seek", arguments: '{}' } }, result: { success: true, message: "ok" } },
 	{ kind: "compaction_completed", droppedEntries: 3, summaryDigest: "digest" },
+	{ kind: "proposal", toolCallId: "call", proposalDigest: "digest", artifactId: "proposal-artifact" },
 	{ kind: "role_switch", roleId: "editor" },
 ];
 

@@ -49,7 +49,7 @@ export async function loadResumeState(history: RuntimeHistory, ledger: RuntimeLe
 	const cursor = entries.findLast(entry => entry.kind === "run_state" && entry.runId === runId);
 	if (!cursor || cursor.kind !== "run_state") rejectRecovery("Run has no durable recovery cursor");
 	const records = await ledger.query(runId);
-	if (records.some(record => record.event.kind === "terminal" && record.event.status !== "interrupted")) rejectRecovery("Cannot resume a terminal ledger run");
+	if (records.some(record => record.event.kind === "terminal" && (record.event.status === "completed" || record.event.status === "failed"))) rejectRecovery("Cannot resume a terminal ledger run");
 	const checkpoints = await history.checkpoints();
 	const referenced = checkpoints.find(checkpoint => checkpoint.checkpointId === cursor.checkpointId);
 	if (!referenced || referenced.sessionId !== history.sessionId || (referenced.runId !== undefined && referenced.runId !== runId)) rejectRecovery("Recovery cursor references an invalid checkpoint");
@@ -74,6 +74,14 @@ export async function loadResumeState(history: RuntimeHistory, ledger: RuntimeLe
 				continue;
 			}
 			const execution = await ledger.getToolExecution(entry.toolCallId);
+			if (!execution && entry.artifactId === undefined && canonicalJson(entry.result) === canonicalJson({ success: false, message: "approval_denied" })) {
+				const decision = records.findLast(record => record.event.kind === "approval" && record.event.toolCallId === call.id);
+				const request = entries.findLast(item => item.kind === "approval_requested" && item.toolCallId === call.id);
+				const resolution = entries.findLast(item => item.kind === "approval_resolved" && item.toolCallId === call.id);
+				const bound = request?.kind !== "approval_requested" || (request.runId === runId && request.argsDigest === computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [call] }])
+					&& resolution?.kind === "approval_resolved" && resolution.runId === runId && resolution.decision === "deny" && resolution.proposalDigest === request.proposalDigest);
+				if (bound && decision?.event.kind === "approval" && decision.event.decision === "deny") continue;
+			}
 			if (execution?.event.kind !== "tool_exec" || !execution.event.artifactId) rejectRecovery("Checkpoint result has no committed execution");
 			const artifact = await artifacts.get(execution.event.artifactId);
 			if (!artifact || artifact.sessionId !== history.sessionId || canonicalJson(artifact.value) !== canonicalJson(entry.result)) rejectRecovery("Checkpoint result artifact mismatch");

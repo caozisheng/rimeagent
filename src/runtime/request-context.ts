@@ -1,4 +1,4 @@
-import type { AgentRuntimeConfig } from "./runtime";
+import type { AgentRuntimeConfig } from "./contracts";
 import type { AgentArtifactStore } from "../store/artifact-store";
 import type { AgentSessionStore } from "../store/session-store";
 import type { AgentRuntimeEventPayload } from "../events";

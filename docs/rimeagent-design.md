@@ -2,7 +2,7 @@
 
 > **Status**: Accepted — 2026-10-08 · Rev3 2026-10-11（排期重排：VercelAIBackend 前置 Phase 1；runner 顺延 Phase 2–6；NativeLLMBackend 移出排期转附录 C）
 > **基线**: rimeagent `v0.1.0` @ `f30d9cb`（17 文件 / 1,398 行，源码核对）
-> **实施进度（2026-10-12）**：Phase 0/1 已提交 `394ee50` 并合入远端；Phase 2/3 已提交本地 `e78e684`；Phase 4/5 引擎侧交付已实施，包版本准备为 `0.7.0`（未提交本增量、未发布、未打 tag）。`bun test` 421 项通过，typecheck / 完整 build / core-only build 通过。真实 HTTP/SSE + Chromium IndexedDB 连续完成55工具轮次，4次 compaction；大结果原值保留artifact、模型只见摘要；最新facts-revision-55仍在请求头部。真实400 context_overflow 观察到 compaction→输出128降64→工具允许列表缩小，成功后只执行1次工具；压缩会话中断→刷新→同runId恢复，副作用计数57不变，key不落三件套。独立审查的项目 binding、最终 token 门禁与最后尝试存储错误三项均有 failing-before/passing-after 回归；构建产物冒烟验证旧项目计划零执行且保留真实模型用量。Phase 6–8 尚未实施；NativeLLMBackend 明确不做。宿主SQLite/file与真实编辑任务仍由宿主仓验收，未更改pin或代签验收。
+> **实施进度（2026-10-12）**：Phase 0/1 已提交 `394ee50` 并合入远端；Phase 2/3 提交 `e78e684`；Phase 4/5 提交 `1348e01`；Phase 6 引擎侧交付已实施，包版本 `0.8.0`（未发布、未打 tag）。`bun test` 450 项通过，typecheck / 完整 build / core-only build 通过，dist 已生成。实际 HTTP/SSE + Chromium IndexedDB 验证审批 proposal→等待→刷新→持久化决策→同 run/call 恢复，副作用一次；读并发峰值2、结果顺序稳定、写/undo/redo/restore revision 连续且不重叠。独立审查发现的批次旧 revision、已提交审批重放、deny checkpoint 崩溃、并发决策、策略改变覆盖缓存、preflight 存储错误均有 failing-before/passing-after 回归；编译产物冒烟验证缓存结果在 deny/suspend 新策略下仍重放且零新副作用，adapter 错误保持原异常。Phase 7/8 尚未实施；NativeLLMBackend 明确不做。宿主SQLite/file、38工具标注迁移与真实编辑任务仍由宿主仓验收，未更改pin或代签验收。
 > **上游决策**:
 > - `rimecut-public/docs/rimecut-feature-dev-rimeagent-design.md` §12（Durable Agent Runtime 决策版，2026-10-08）
 > - `rimecut-public/docs/rimecut-cli-for-agent.md` v3（§D5/D6：内置 agent 快路径、harness 方法、parity 已验收项）
@@ -374,12 +374,12 @@ RimeCut 38 个工具的默认标注（宿主侧 Phase 4 任务，本仓只定义
 export type PreflightDecision =
   | { action: "allow" }
   | { action: "deny"; reason?: string }
-  | { action: "suspend"; reason: string };
+  | { action: "suspend"; reason: string; proposal?: JsonValue; proposalDigest?: string };
 
 export interface ApprovalGate {
   preflight(call: ToolCallContext): PreflightDecision | Promise<PreflightDecision>;
-  /** suspend 后宿主收集用户决策（可跨进程重启），回写 store 并唤醒 run */
-  resolve(toolCallId: string, decision: "allow" | "deny", note?: string): Promise<void>;
+  /** Called only after a durable user decision has been appended. */
+  resolve?(toolCallId: string, decision: "allow" | "deny", note?: string): Promise<void>;
 }
 
 export interface ToolCallContext {
@@ -392,6 +392,8 @@ export interface ToolCallContext {
 ```
 
 持久化语义：suspend 时 runtime 落盘 `approval_requested` entry + `run_awaiting_approval` + checkpoint（durable boundary），事件流结束；`resume()` 读回持久化决策，**以同一 toolCallId 继续**。executor 侧第二道防线：执行前查 ledger，该 `toolCallId` 已有成功记录则跳过并返回缓存结果——刷新后不丢待确认任务，也不重复执行非幂等工具。
+审批请求绑定 `toolCallId + argsDigest + session/run + projectId/revision`；旧 revision 或改变参数的决策不能续接。proposal payload 先校验 strict JSON，再将规范序列化 preview 保存为 artifact；host preflight 同时给出 `proposalDigest`，engine 按当前 canonical JSON digest 重算、比较后才持久化/展示。proposal 事件只携带 `toolCallId/proposalDigest/artifactId`，UI 从 artifact 读取预览，不把完整 diff 挤入流。缺 proposal preview 的 suspend 仍可审批，但不得伪称提供 diff proposal。
+
 
 默认分类（缺省 ApprovalGate 实现 `createDefaultApprovalGate()`）：只读自动允许；普通编辑自动允许；`destructive` / `requiresApproval` 标注 → suspend；proposal 生成后仍走同一审批通道。
 
@@ -795,6 +797,21 @@ Phase 5 实施冻结补充（2026-10-12）：
 | 6.5 宿主标注迁移指引 | `docs/rimeagent-design.md` | RimeCut 38 工具的标注表（§5.5）由 rimecut 仓落地；本仓提供 contract test 校验标注完整性 | 每个注册工具 annotations 齐全（宿主侧门禁） |
 
 **Phase 6 出口**：删除/生成/export 审批；revision 和 undo chain 正确。
+
+Phase 6 实施冻结补充（2026-10-12）：
+
+- 缺省串行；`executor.parallelReadOnly=true` 且工具同时显式 `readOnly=true` / `executionMode=parallel` 才并行相邻读组。`Promise.allSettled` 等待已启动读，结果按模型顺序持久化/发出；写、角色切换和 undo/redo/restore 保持独占串行边界。
+- runtime 缺省注入 `createDefaultApprovalGate()`；destructive/requiresApproval 进入 durable suspend，整个待执行模型批次先审批。旧 requiresConfirmation 保持拒绝，宿主迁移到 annotations；旧 session 回调策略不变。
+- `resolveApproval(toolCallId, decision, note?)` 先追加唯一决策，再 ledger 记账，最后可选通知 gate；相同决策重入不重复通知，冲突/其他 run/已消费调用拒绝。resume 沿同 runId/seq、同 toolCallId 读决策并走 intent/artifact 重放保护，deny 落失败结果但零副作用。
+- proposal 校验 strict JSON 与 canonical digest 后保存 artifact；事件只有 toolCallId/proposalDigest/artifactId。绑定在 resolve、resume 准备和每个 dispatch 前复核，前序批次写导致旧 revision 的后序审批必须拒绝。FNV digest 是一致性校验，不是密码学认证。
+- 审查恢复补充：已提交且 call/run/args 匹配的 tool_exec 仅重放缓存，无新宿主副作用，故不以原审批 revision 阻断；恢复仍校验 checkpoint revision chain、artifact/session 与 proposal。deny 的 checkpoint 外结果必须精确匹配失败模板及 durable ledger deny/请求决策绑定；并发相同 resolve 的 ledger 序号冲突通过已提交匹配决策对账，不误报存储失败。三项均复现失败后修复。
+- 已完成调用优先于新的 gate 策略：即使最初 autoallow、恢复时策略变为 deny/suspend，也重放匹配缓存结果，不伪造失败或对既成副作用再次请求审批。preflight 的 replay-index 读取失败仍抛原 adapter 异常并标记持久化故障，不能转成普通 run_failed 事件。
+
+- `tests/contract/tool-annotation-contract.ts` 的 `assertToolAnnotationContract(tools)` 检查最终宿主 registry 的五个显式字段、唯一名称、禁止并行写和矛盾 read/destructive。RimeCut 38 工具真实标注、EditorCore undo chain 与三宿主验收仍归宿主仓；本仓不改宿主 pin，不代签。npm `./contract` 发布留在 Phase 7。
+- 实际 HTTP/SSE + Chromium IndexedDB 验证 proposal → 等待 → 刷新 → 重开三件套 → resolve → 同 run 完成，副作用一次、revision 4→5；交错读完成顺序逆转但结果仍按模型顺序，写/undo/redo/restore 命令 revision 连续 4→9，读并发峰值2且无写重叠。NativeLLMBackend 明确排除。
+- Phase 6 最终门禁：450 tests / typecheck / full build / core-only build 全通过；两路独立审查的重要问题已修复。dist smoke 覆盖 autoallow 已提交调用的 deny/suspend 策略变化与 replay-index 原异常传播，新增副作用均为0。
+
+
 
 ### 7.8 Phase 7：CLI/MCP/parity 对接（2.5 周）
 

@@ -37,10 +37,13 @@ export type { AgentArtifact, AgentArtifactStore } from "./store/artifact-store";
 export type { JsonValue } from "./store/json";
 export { InMemoryLedger, isLedgerRecord } from "./runtime/ledger";
 export type { ApprovalDecision, LedgerRecord, RuntimeLedger } from "./runtime/ledger";
-export { createToolExecutor } from "./runtime/executor";
+export { createToolExecutor, ApprovalRequiredError } from "./runtime/executor";
 export type { ToolExecutor, ToolExecutorOptions, ToolExecutorContext } from "./runtime/executor";
+export type { ToolExecutorConfig } from "./runtime/executor";
+export { createDefaultApprovalGate, computeProposalDigest, validateProposalDecision } from "./runtime/approval";
+export type { ApprovalGate, ApprovalResolution, PreflightDecision, ToolCallContext, DefaultApprovalGateOptions } from "./runtime/approval";
 export { createContextManager } from "./runtime/context-manager";
 export type { ContextManagerConfig, ContextProjection, ProjectFactsDigest, ContextManager, ContextManagerOptions, ContextProjectInput, ContextBudget, ContextSummary, SummarizeContextInput, ContextSummarizer, } from "./runtime/context-manager";
 export { createAgentRuntime } from "./runtime/runtime";
-export type { AgentRuntime, AgentRuntimeConfig, AgentRuntimeState } from "./runtime/runtime";
+export type { AgentRuntime, AgentRuntimeConfig, AgentRuntimeState } from "./runtime/contracts";
 //# sourceMappingURL=index.d.ts.map

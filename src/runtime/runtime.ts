@@ -1,14 +1,9 @@
 import { nanoid } from "nanoid";
 import type { AgentLLMConfig, AgentMessage, ToolDefinition } from "../types";
-import type { AgentTool } from "../tool-types";
-import type { PromptLayer } from "../prompt-builder";
-import type { RagBuilder, ErrorRecoveryBuilder } from "../rag-types";
 import type { AgentSessionConfig, AgentSessionParams } from "../session";
-import type { AgentSessionStore } from "../store/session-store";
 import { InMemorySessionStore } from "../store/session-store";
 import type { AgentCheckpointRef } from "../store/checkpoint";
 import { computeContextDigest } from "../store/checkpoint";
-import type { AgentArtifactStore } from "../store/artifact-store";
 import { InMemoryArtifactStore } from "../store/artifact-store";
 import type { AgentRuntimeEvent, AgentRuntimeEventPayload } from "../events";
 import { createAgentRuntimeEvent } from "../events";
@@ -20,51 +15,14 @@ import type { IterationOutcome, IterationStream } from "./iteration";
 import { RuntimeHistory, assertCompleteHistory, projectMessages } from "./history";
 import { assertNewRun, loadResumeState, rejectRecovery } from "./recovery";
 import type { ResumeState } from "./recovery";
-import type { ContextManagerConfig, ContextSummarizer, ProjectFactsDigest } from "./context-manager";
-import type { ToolFailureRecord } from "../session";
 import { createRuntimeRequestContext } from "./request-context";
 import type { LedgerRecord, RuntimeLedger } from "./ledger";
 import { InMemoryLedger } from "./ledger";
 import { createToolExecutor } from "./executor";
+import type { AgentRuntime, AgentRuntimeConfig, AgentRuntimeState } from "./contracts";
+import { createDefaultApprovalGate } from "./approval";
+import { createRuntimeApproval } from "./approval-controller";
 
-export type AgentRuntimeState = "idle" | "running" | "interrupted" | "settled";
-export interface AgentRuntimeConfig {
-	readonly sessionId: string;
-	readonly llmConfig: AgentLLMConfig;
-	readonly expertRoleId: string;
-	readonly sessionStore: AgentSessionStore;
-	readonly ledger?: RuntimeLedger;
-	readonly artifactStore?: AgentArtifactStore;
-	readonly tools: readonly AgentTool[];
-	readonly maxIterations?: number;
-	readonly context?: ContextManagerConfig;
-	readonly initialMessages?: readonly AgentMessage[];
-	readonly activeRoleId?: string;
-	readonly identityPrompt?: string;
-	readonly workRules?: string;
-	readonly customLayers?: PromptLayer[];
-	readonly locale?: "zh" | "en";
-	readonly switchRoleToolDef?: ToolDefinition;
-	readonly hooks?: {
-		readonly buildDynamicContext?: () => string | null;
-		readonly buildRagContext?: RagBuilder;
-		readonly buildErrorRecovery?: ErrorRecoveryBuilder;
-		readonly onRoleSwitch?: (roleId: string) => AgentLLMConfig | void;
-		readonly getProjectFacts?: () => ProjectFactsDigest;
-		readonly summarizeContext?: ContextSummarizer;
-		/** Host returns tool names from active skills' toolRefs; definitions stay engine-owned. */
-		readonly filterTools?: (tools: readonly ToolDefinition[], context: {
-			activeRoleId: string; projectFacts?: ProjectFactsDigest; failures: readonly ToolFailureRecord[];
-		}) => readonly string[] | Promise<readonly string[]>;
-	};
-}
-export interface AgentRuntime {
-	readonly state: AgentRuntimeState;
-	run(userMessage: string, signal?: AbortSignal): AsyncGenerator<AgentRuntimeEvent>;
-	resume(runId: string, signal?: AbortSignal): AsyncGenerator<AgentRuntimeEvent>;
-	checkpoint(label?: string): Promise<AgentCheckpointRef>;
-	abort(reason?: string): void;
-}
 type CompatibilitySession = { params: AgentSessionParams; config: AgentSessionConfig };
 
 function createRuntime(config: AgentRuntimeConfig, compatibility?: CompatibilitySession): AgentRuntime {
@@ -74,7 +32,12 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 	const history = new RuntimeHistory(config.sessionStore, config.sessionId);
 	const ledger = config.ledger ?? new InMemoryLedger();
 	const artifactStore = config.artifactStore ?? new InMemoryArtifactStore();
-	const executor = createToolExecutor({ sessionId: config.sessionId, tools: config.tools, ledger, artifactStore });
+	const gate = config.approval ?? createDefaultApprovalGate();
+	const executor = createToolExecutor({ sessionId: config.sessionId, tools: config.tools, ledger, artifactStore,
+		approval: gate, executor: config.executor });
+	let approvalFailures = 0;
+	const approval = createRuntimeApproval({sessionId: config.sessionId, sessionStore: config.sessionStore, artifactStore, ledger, history, executor, gate,
+		facts: config.hooks?.getProjectFacts, onPersistenceFailure: () => { approvalFailures++; }});
 	const registry = createToolRegistry();
 	for (const tool of config.tools) {
 		if (registry.get(tool.name)) throw new TypeError(`Duplicate runtime tool: ${tool.name}`);
@@ -96,6 +59,7 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 		const previousState = state;
 		const runId = resumeId ?? nanoid();
 		const persistenceFailures = history.persistenceFailures;
+		const priorApprovalFailures = approvalFailures;
 		let ledgerFailed = false;
 		let seq = 0;
 		let iteration = 0;
@@ -105,6 +69,7 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 		let terminal = false;
 		let lastCheckpoint: AgentCheckpointRef | undefined;
 		let iterator: IterationStream | undefined;
+		let approvalDecisions: Readonly<Record<string, "allow" | "deny">> = Object.create(null);
 		const nextSeq = () => ++seq;
 		// Message hooks can settle the phase while the iteration generator is suspended.
 		const hasSettledResponse = (): boolean => phase === "settled";
@@ -200,7 +165,7 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 			const sessionConfig: AgentSessionConfig = compatibility?.config ?? {
 				maxIterations,
 				async onToolCall(call) {
-					try { return await executor.execute(call, { runId, nextSeq, signal }); }
+					try { return await executor.execute(call, { runId, nextSeq, signal, approvalDecisions }); }
 					catch (cause) {
 						// Executor persistence errors must remain rejected, not a false completion.
 						if (!(typeof cause === "object" && cause !== null && "category" in cause)) ledgerFailed = true;
@@ -226,6 +191,25 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 					beforeRequest: requestContext?.prepare,
 					onContextOverflow: requestContext?.recover,
 					onPreparationError: requestContext?.guardPreparationError,
+					beforeToolBatch: compatibility ? undefined : async calls => {
+						await assertHostBoundary();
+						const ready = await approval.prepare(calls, {runId, nextSeq, signal, recordLedger, projectFacts: config.hooks?.getProjectFacts,
+							onPersistenceFailure: () => { ledgerFailed = true; },
+							checkpoint: async () => { await assertHostBoundary(); return boundary(); }});
+						if (ready.status === "awaiting_approval") return ready.events;
+						approvalDecisions = ready.decisions;
+						await assertHostBoundary();
+						return undefined;
+					},
+					parallelTool: compatibility || !config.executor?.parallelReadOnly ? undefined : call => {
+						const annotations = registry.get(call.function.name)?.annotations;
+						return annotations?.readOnly === true && annotations.executionMode === "parallel"
+							&& call.function.name !== "undo" && call.function.name !== "redo" && call.function.name !== "restore" && call.function.name !== "switch_expert_role";
+					},
+					onToolBatch: compatibility ? undefined : async calls => {
+						try { return await executor.executeBatch(calls, {runId, nextSeq, signal, approvalDecisions}); }
+						catch (cause) { ledgerFailed = true; throw cause; }
+					},
 					onMessage: async (message, usage) => {
 						if (!compatibility && message.role === "assistant") {
 							await recordLedger({ kind: "model_call", provider: llmConfig.provider ?? "openai", model: llmConfig.model,
@@ -255,6 +239,10 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 					},
 					onToolStart: async call => {
 						await assertHostBoundary();
+						if (!compatibility) {
+							await approval.assertBinding(call, runId);
+							await assertHostBoundary();
+						}
 						await boundary();
 						const argsDigest = computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [call] }]);
 						await history.append({ kind: "tool_call", toolCallId: call.id, name: call.function.name, argsDigest });
@@ -275,9 +263,19 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 						if (phase !== "settled") { phase = "model"; iteration = payload.iteration + 1; }
 						await boundary();
 					}
+					if ("kind" in payload && payload.kind === "run_awaiting_approval") {
+						phase = "tools";
+						await recordLedger({kind: "terminal", status: "awaiting_approval"});
+						const waiting = await event(payload);
+						terminal = true;
+						state = "awaiting_approval";
+						yield waiting;
+						return;
+					}
 					yield await event(payload);
 				}
 			}
+			if (outcome.reason === "awaiting_approval") return;
 			if (signal.aborted || outcome.reason === "interrupted") { yield await interrupt(); return; }
 			if (outcome.reason === "error") {
 				const error = outcome.error ?? normalizeError(outcome.errorMessage ?? "Model request failed");
@@ -302,7 +300,7 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 			yield result;
 		} catch (cause) {
 			if (!validated) { state = previousState; throw cause; }
-			if (history.persistenceFailures !== persistenceFailures || ledgerFailed) {
+			if (history.persistenceFailures !== persistenceFailures || ledgerFailed || approvalFailures !== priorApprovalFailures) {
 				terminal = true;
 				state = "settled";
 				if (started) {
@@ -350,6 +348,10 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 		get state() { return state; },
 		run: (message, signal) => execute(message, undefined, signal),
 		resume: (runId, signal) => execute(undefined, runId, signal),
+		async resolveApproval(toolCallId, decision, note) {
+			if (active) throw new Error("Cannot resolve approval while a run is active");
+			await approval.resolve(toolCallId, decision, note);
+		},
 		checkpoint: label => activeCheckpoint ? activeCheckpoint(label) : history.checkpoint(label),
 		abort(reason) { active?.abort(reason); },
 	};

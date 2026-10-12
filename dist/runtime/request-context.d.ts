@@ -1,4 +1,4 @@
-import type { AgentRuntimeConfig } from "./runtime";
+import type { AgentRuntimeConfig } from "./contracts";
 import type { AgentArtifactStore } from "../store/artifact-store";
 import type { NormalizedError } from "../errors";
 import type { LedgerRecord } from "./ledger";

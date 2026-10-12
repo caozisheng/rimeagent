@@ -44,6 +44,11 @@ export type AgentRuntimeEventPayload = {
     droppedEntries: number;
     summaryDigest: string;
 } | {
+    kind: "proposal";
+    toolCallId: string;
+    proposalDigest: string;
+    artifactId: string;
+} | {
     kind: "role_switch";
     roleId: string;
 };

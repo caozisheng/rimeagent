@@ -27,6 +27,7 @@ export type AgentRuntimeEventPayload =
 	| AgentEvent
 	| { kind: "tool_result"; toolCall: ToolCall; result: AgentToolResult }
 	| { kind: "compaction_completed"; droppedEntries: number; summaryDigest: string }
+	| { kind: "proposal"; toolCallId: string; proposalDigest: string; artifactId: string }
 	| { kind: "role_switch"; roleId: string };
 
 type EventType<P extends AgentRuntimeEventPayload> = P extends { kind: infer K extends string }
@@ -46,6 +47,7 @@ const payloadKeys: Record<string, readonly string[]> = {
 	text_delta: ["type", "content"], tool_calls_complete: ["type", "toolCalls"],
 	message_end: ["type", "usage"], error: ["type", "message"], status: ["type", "status"],
 	tool_result: ["kind", "toolCall", "result"],
+	proposal: ["kind", "toolCallId", "proposalDigest", "artifactId"],
 	compaction_completed: ["kind", "droppedEntries", "summaryDigest"], role_switch: ["kind", "roleId"],
 };
 
@@ -70,6 +72,7 @@ function isPayload(type: string, value: unknown): value is AgentRuntimeEventPayl
 			(value.status === "idle" || value.status === "thinking" || value.status === "streaming" || value.status === "error");
 		case "tool_result": return Object.hasOwn(value, "toolCall") && Object.hasOwn(value, "result") && isToolCall(value.toolCall) && isToolResult(value.result);
 		case "compaction_completed": return Object.hasOwn(value, "droppedEntries") && Object.hasOwn(value, "summaryDigest") && isCount(value.droppedEntries) && isId(value.summaryDigest);
+		case "proposal": return Object.hasOwn(value, "toolCallId") && isId(value.toolCallId) && Object.hasOwn(value, "proposalDigest") && isId(value.proposalDigest) && Object.hasOwn(value, "artifactId") && isId(value.artifactId);
 		case "role_switch": return Object.hasOwn(value, "roleId") && isId(value.roleId);
 		default: return false;
 	}

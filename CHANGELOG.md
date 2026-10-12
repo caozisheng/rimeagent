@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0 — 2026-10-12 (unreleased)
+
+- Added default annotation-based approval gates, durable pending requests and `resolveApproval()` with persisted allow/deny decisions and same-run/call resume after reload.
+- Added strict JSON proposal previews stored as immutable artifacts; event payloads carry validated proposal digests and artifact references, not full diffs.
+- Bound approvals to arguments, session/run, project identity/revision and preview digest, including revalidation before each dispatch when earlier batch edits change the project.
+- Added opt-in adjacent read-only parallelism with all-settled handling and model-order results. Writes, role switches and undo/redo/restore remain serial barriers; default and legacy scheduling remain unchanged.
+- Added host annotation contract checks and RimeCut registry migration guidance. NativeLLMBackend and Phase 7 contract publication remain excluded.
+- Closed approval recovery crash windows: replay matching committed results despite the original approval revision; recognize denied session-result suffixes through their durable decisions; reconcile identical concurrent resolution ledger claims.
+- Completed result replay takes precedence over changed approval policies; preflight replay-index failures preserve the original adapter exception instead of becoming normal run outcomes. Both paths have failing-before/passing-after regressions and compiled-runtime smoke coverage.
+- Verified actual HTTP/SSE and Chromium IndexedDB approval → reload → resolve → same-run completion with one side effect, plus overlapping reads and ordered command/revision transitions through undo/redo/restore.
+
 ## 0.7.0 — 2026-10-12 (unreleased)
 
 - Added `createContextManager()` and runtime context budgets over system prompts, complete conversation/tool turns and tool schemas, with an injectable tokenizer.

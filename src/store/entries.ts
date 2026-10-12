@@ -11,8 +11,9 @@ export type AgentSessionEntry =
 	| { kind: "assistant_message"; id: string; ts: number; content: string; toolCalls?: ToolCall[]; usage?: TokenUsage }
 	| { kind: "tool_call"; id: string; ts: number; toolCallId: string; name: string; argsDigest: string }
 	| { kind: "tool_result"; id: string; ts: number; toolCallId: string; result: AgentToolResult; artifactId?: string }
-	| { kind: "approval_requested"; id: string; ts: number; toolCallId: string; reason: string }
-	| { kind: "approval_resolved"; id: string; ts: number; toolCallId: string; decision: "allow" | "deny"; by: "user" | "policy" }
+	| { kind: "approval_requested"; id: string; ts: number; toolCallId: string; reason: string; runId?: string; argsDigest?: string; projectId?: string; projectRevision?: number; proposalDigest?: string; artifactId?: string }
+	| { kind: "approval_resolved"; id: string; ts: number; toolCallId: string; decision: "allow" | "deny"; by: "user" | "policy"; runId?: string; note?: string; proposalDigest?: string }
+	| { kind: "proposal"; id: string; ts: number; toolCallId: string; proposalDigest: string; artifactId: string }
 	| { kind: "compaction"; id: string; ts: number; summary: string; compactedEntryIds: string[]; projectDigest: ProjectFactsDigest }
 	| { kind: "checkpoint"; id: string; ts: number; checkpointId: string; projectRevision?: number }
 	| { kind: "branch"; id: string; ts: number; fromCheckpointId: string; branchId: string }

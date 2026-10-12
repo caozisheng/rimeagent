@@ -3,7 +3,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { createIndexedDBStores } from "../../src/adapters/indexeddb";
 import { createAgentRuntime } from "../../src/runtime/runtime";
 import { registerLLMBackendFor } from "../../src/llm-client";
-import type { AgentRuntime, AgentRuntimeConfig } from "../../src/runtime/runtime";
+import type { AgentRuntime, AgentRuntimeConfig } from "../../src/runtime/contracts";
 import type { AgentRuntimeEvent } from "../../src/events";
 import type { AgentTool } from "../../src/tool-types";
 

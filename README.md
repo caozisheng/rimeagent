@@ -149,7 +149,7 @@ if (decoded?.type === "run_started") {
   `getToolExecution(toolCallId)`. Positive safe-integer sequences strictly increase
   per run (gaps allowed). Global tool intent claims reject duplicate writers;
   replay lookup prefers a successful execution, otherwise the latest intent/result.
-- `serializeAgentSessionEntry` / `parseAgentSessionEntry` validate all 17 kinds
+- `serializeAgentSessionEntry` / `parseAgentSessionEntry` validate all 18 kinds
   and nested typed fields. Serializing live errors removes opaque `cause`;
   parsing persisted causes or unknown kinds/fields rejects. Host code must still
   keep secrets out of prompt/result text and arbitrary tool data.
@@ -161,16 +161,16 @@ if (decoded?.type === "run_started") {
   UTF-8 FNV-1a32; UI IDs/timestamps/results are ignored. It is not a cryptographic
   integrity mechanism, and branching never restores a host project.
 - `AgentTool.annotations` carries read-only/destructive/idempotent/approval and
-  serial/parallel metadata without entering the LLM schema. Execution is serial;
-  approval-sensitive calls fail before execution until the approval gate arrives.
+  serial/parallel metadata without entering the LLM schema. Scheduling defaults to
+  serial; explicit approval-sensitive annotations suspend the durable runtime.
 
 The memory stores are volatile: reuse the same three instances for in-process
-resume, or inject durable stores for reload/process recovery. Runtime 0.7.0 builds
+resume, or inject durable stores for reload/process recovery. Runtime 0.8.0 builds
 token-budgeted projections and host-produced compaction summaries without changing
 the append-only log. Shared host storage probes live in
 `tests/contract/store-contract.ts`; the published `./contract` subpath remains a later phase.
 
-## Agent runtime (0.7.0)
+## Agent runtime (0.8.0)
 
 ```typescript
 import { createAgentRuntime, InMemorySessionStore } from "rimeagent";
@@ -230,10 +230,56 @@ settles without another provider request. Credentials and full model config are
 not persisted; `onRoleSwitch` resolves the restored role's model configuration.
 Fresh runs reset the configured initial role/model; only resume restores that
 run's saved role override.
-New runtime tools marked destructive/requiresApproval/requiresConfirmation return
-a failure before execution; the existing session callback policy is untouched.
-Tool scheduling is serial. Approval suspend/resume and parallel tool strategies
-remain unimplemented; no placeholder `resolveApproval()` is exported.
+New runtime tools marked `destructive` or `requiresApproval` suspend before any
+call in that model batch executes. Legacy `requiresConfirmation` remains refused;
+migrate durable tools to annotations. The existing session callback policy is untouched.
+
+### Durable approval and proposals
+
+The default `createDefaultApprovalGate()` allows ordinary/read-only tools and
+suspends explicitly destructive/approval-required calls. Handle
+`run_awaiting_approval`, persist its `runId`, and display the pending call. Reopen
+the same session/artifact/ledger stores after reload, then:
+
+```typescript
+await runtime.resolveApproval(toolCallId, "allow", "Reviewed by user"); // or "deny"
+for await (const event of runtime.resume(runId)) handleEvent(event);
+```
+
+Resolution is persisted before the optional gate notification. Repeated identical
+decisions are idempotent; conflicting, foreign, terminal or already-consumed calls
+reject. Denial creates a durable failed tool result without invoking the tool.
+Resume keeps the same run/call IDs and executes through ledger replay protection.
+Approval binds arguments, run/session, project identity/revision and proposal.
+Bindings are rechecked before dispatch: even an earlier edit in the same batch
+can invalidate a later approval. A stale plan fails rather than editing a changed project.
+Matching committed results replay without another policy decision or host effect,
+even if the original approval revision or current gate policy has changed.
+
+For custom host previews, supply `approval.preflight(context)` returning
+`{ action: "suspend", reason, proposal, proposalDigest: computeProposalDigest(proposal) }`.
+The proposal must be strict JSON. Its canonical digest is verified before storage;
+`proposal` events carry only `toolCallId`, `proposalDigest` and `artifactId`.
+Read the immutable preview with `artifactStore.get(artifactId)`; no preview means
+no proposal event. Digests use FNV-1a32, not cryptographic authentication.
+
+### Scheduling and host tool annotations
+
+Set `executor: { parallelReadOnly: true }` to overlap adjacent calls whose tools
+explicitly declare `readOnly: true, executionMode: "parallel"`. Results stay in
+model order even when reads finish out of order. Every write, role switch and
+`undo`/`redo`/`restore` is a serial barrier. Started reads all settle before the
+next write; cancellation starts no later batch. Default scheduling remains serial.
+
+RimeCut's tool registry migration belongs to the host repository. Annotate every
+registered domain tool with explicit `readOnly`, `destructive`, `idempotent`,
+`requiresApproval`, and `executionMode`; use the classification table in
+[design §5.5](docs/rimeagent-design.md#55-tool-annotations-与执行策略对-g5-部分).
+Run `assertToolAnnotationContract(tools)` from
+`tests/contract/tool-annotation-contract.ts` against the assembled registry. It
+rejects missing policies, duplicate names, parallel writes and contradictory
+destructive reads without executing tools. The npm `./contract` export is Phase 7,
+not part of this version; pin/copy the repository helper until that cutover.
 
 ## Durable Web stores and recovery
 
@@ -269,9 +315,15 @@ Model-call accounting commits before confirmed assistant history, so a restart
 after confirmation cannot discard reported usage. Missing provider usage remains
 unknown rather than being reported as zero consumption.
 
-`createToolExecutor({sessionId, tools, ledger, artifactStore})` is also available
-for hosts needing the same serial durable execution policy. Its
-`execute(call, {runId, nextSeq, signal?})` requires a shared sequence allocator.
+`createToolExecutor({sessionId, tools, ledger, artifactStore, approval?, executor?})`
+is available for hosts needing the same durable execution policy. Its `preflight`,
+`execute`, and `executeBatch` share `{runId, nextSeq, signal?, projectFacts?, approvalDecisions?}`;
+`nextSeq` must be shared with the host's run ledger. Low-level suspension rejects
+before effects; the runtime owns durable suspension/resolution. Supply only
+runtime-validated durable `approvalDecisions`, never unchecked UI decisions.
+Catch `ApprovalRequiredError` to inspect its `toolCall` and suspend `decision`.
+Optional context `onPersistenceFailure` marks preflight adapter faults; the original
+adapter exception still rejects, distinct from policy allow/deny/suspend outcomes.
 Execution commits an intent before calling the host, then an immutable result
 artifact, then a `tool_exec` record, then the runtime's session result. Completed
 successes **and failures** replay their cached result without invoking the tool.

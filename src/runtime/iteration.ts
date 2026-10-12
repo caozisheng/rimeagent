@@ -1,6 +1,7 @@
 import type { AgentMessage, ToolCall, TokenUsage } from "../types";
 import type { AgentRuntimeEventPayload } from "../events";
 import type { AgentSessionConfig, AgentSessionParams, ToolFailureRecord } from "../session";
+import type { AgentToolResult } from "../tool-types";
 import { nanoid } from "nanoid";
 import { SWITCH_ROLE_TOOL_NAME } from "../service";
 import type { PreparedAgentRequest, RunAgentLoopParams } from "../service";
@@ -8,7 +9,7 @@ import type { NormalizedError } from "../errors";
 import { runIterationRequests } from "./request-attempt";
 
 export interface IterationOutcome {
-	reason: "response" | "max_iterations" | "error" | "interrupted";
+	reason: "response" | "max_iterations" | "error" | "interrupted" | "awaiting_approval";
 	iterations: number;
 	errorMessage?: string;
 	error?: NormalizedError;
@@ -40,6 +41,9 @@ export interface IterationHooks {
 	onPreparationError?: (cause: unknown) => void;
 	onMessage?: (message: AgentMessage, usage?: TokenUsage) => Promise<void>;
 	onToolStart?: (toolCall: ToolCall) => Promise<void>;
+	beforeToolBatch?: (calls: readonly ToolCall[]) => Promise<readonly AgentRuntimeEventPayload[] | undefined>;
+	parallelTool?: (call: ToolCall) => boolean;
+	onToolBatch?: (calls: readonly ToolCall[]) => Promise<readonly AgentToolResult[]>;
 	initialState?: InitialIterationState;
 	/** Internal compatibility policy: deliver callbacks before JSON history conversion. */
 	legacyToolResults?: boolean;
@@ -55,12 +59,41 @@ export async function* runSessionIterations(params: AgentSessionParams, config: 
 	let iterationOffset = hooks.initialState?.iterationOffset ?? 0;
 	let iterations = iterationOffset;
 
-	async function* executeBatch(calls: readonly ToolCall[]): AsyncGenerator<AgentRuntimeEventPayload, void> {
+	async function* executeBatch(calls: readonly ToolCall[]): AsyncGenerator<AgentRuntimeEventPayload, "complete" | "awaiting_approval"> {
+		const approval = await hooks.beforeToolBatch?.(calls);
+		if (approval) {
+			for (const event of approval) yield event;
+			return "awaiting_approval";
+		}
 		const failures: ToolFailureRecord[] = [...lastIterationFailures];
-		for (const call of calls) {
-			if (params.signal?.aborted) return;
+		for (let index = 0; index < calls.length; index++) {
+			const call = calls[index]!;
+			if (hooks.onToolBatch && hooks.parallelTool?.(call)) {
+				if (params.signal?.aborted) return "complete";
+				let end = index + 1;
+				while (end < calls.length && hooks.parallelTool(calls[end]!)) end++;
+				const group = calls.slice(index, end);
+				for (const item of group) await hooks.onToolStart?.(item);
+				if (params.signal?.aborted) return "complete";
+				const results = await hooks.onToolBatch(group);
+				if (results.length > group.length) throw new Error("Tool batch returned excess results");
+				for (let offset = 0; offset < results.length; offset++) {
+					const item = group[offset]!;
+					const result = results[offset]!;
+					if (!result.success) failures.push({ toolName: item.function.name, errorMessage: result.message });
+					const message: AgentMessage = {id: `tool-${nanoid()}`, role: "tool", toolCallId: item.id, content: JSON.stringify(result), createdAt: Date.now()};
+					allMessages.push(message);
+					await hooks.onMessage?.(message);
+				}
+				if (params.signal?.aborted) return "complete";
+				if (results.length !== group.length) throw new Error("Tool batch returned incomplete results without cancellation");
+				for (let offset = 0; offset < results.length; offset++) yield {kind: "tool_result", toolCall: group[offset]!, result: results[offset]!};
+				index = end - 1;
+				continue;
+			}
+			if (params.signal?.aborted) return "complete";
 			await hooks.onToolStart?.(call);
-			if (params.signal?.aborted) return;
+			if (params.signal?.aborted) return "complete";
 			if (call.function.name === SWITCH_ROLE_TOOL_NAME) {
 				let args: Record<string, unknown> = {};
 				try { args = JSON.parse(call.function.arguments); } catch { /* Preserve legacy fallback. */ }
@@ -71,7 +104,7 @@ export async function* runSessionIterations(params: AgentSessionParams, config: 
 					content: JSON.stringify({ success: true, message: `Switched to ${activeRoleId}` }), createdAt: Date.now() };
 				allMessages.push(message);
 				await hooks.onMessage?.(message);
-				if (params.signal?.aborted) return;
+				if (params.signal?.aborted) return "complete";
 				yield { kind: "role_switch", roleId: activeRoleId };
 				continue;
 			}
@@ -83,15 +116,16 @@ export async function* runSessionIterations(params: AgentSessionParams, config: 
 				content: JSON.stringify(result), createdAt: Date.now() };
 			allMessages.push(message);
 			await hooks.onMessage?.(message);
-			if (params.signal?.aborted) return;
+			if (params.signal?.aborted) return "complete";
 			if (!hooks.legacyToolResults) yield { kind: "tool_result", toolCall: call, result };
 		}
 		lastIterationFailures = failures;
+		return "complete";
 	}
 
 	if (hooks.initialState?.pendingToolCalls?.length) {
 		iterations = iterationOffset + 1;
-		yield* executeBatch(hooks.initialState.pendingToolCalls);
+		if ((yield* executeBatch(hooks.initialState.pendingToolCalls)) === "awaiting_approval") return {reason: "awaiting_approval", iterations};
 		if (params.signal?.aborted) return { reason: "interrupted", iterations };
 		yield { kind: "iteration_end", iteration: iterationOffset };
 		iterationOffset++;
@@ -139,7 +173,7 @@ export async function* runSessionIterations(params: AgentSessionParams, config: 
 						return { reason: params.signal?.aborted ? "interrupted" : "response", iterations };
 					}
 					lastIterationFailures = [];
-					yield* executeBatch(pendingToolCalls);
+					if ((yield* executeBatch(pendingToolCalls)) === "awaiting_approval") return {reason: "awaiting_approval", iterations};
 					if (params.signal?.aborted) return { reason: "interrupted", iterations };
 					assistantContent = "";
 					pendingToolCalls = [];

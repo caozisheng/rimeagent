@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createAgentRuntime } from "../../src/runtime/runtime";
-import type { AgentRuntimeConfig } from "../../src/runtime/runtime";
+import type { AgentRuntimeConfig } from "../../src/runtime/contracts";
 import { InMemorySessionStore } from "../../src/store/session-store";
 import { InMemoryArtifactStore } from "../../src/store/artifact-store";
 import { InMemoryLedger } from "../../src/runtime/ledger";
@@ -119,5 +119,23 @@ test("missing provider usage remains unknown rather than recording zero consumpt
 		const model = records.find(record => record.event.kind === "model_call")!.event;
 		if (model.kind !== "model_call") throw new Error("Missing model usage record");
 		expect(model.usage).toEqual({});
+	} finally { dispose(); }
+});
+
+test.each(["deny", "suspend"] as const)("committed autoallowed calls replay without reevaluating a now-%s policy", async action => {
+	const c = config(`cached-policy-${action}`);
+	const argsDigest = await seedPending(c);
+	await c.artifactStore!.put({ artifactId: "committed", sessionId: c.sessionId, contentType: "application/json", value: { success: true, message: "already published" } });
+	await c.ledger!.append({ runId: "crash", seq: 6, ts: 0, event: { kind: "approval", toolCallId: toolCall.id, decision: "allow" } });
+	await c.ledger!.append({ runId: "crash", seq: 20, ts: 0, event: { kind: "tool_exec", toolCallId: toolCall.id, tool: "edit", argsDigest, outcome: "success", messageDigest: "message", artifactId: "committed" } });
+	let effects = 0;
+	const dispose = registerLLMBackendFor(x => x === c.llmConfig, { type: "cached-policy", async *streamChat(_config, messages) {
+		expect(messages.find(message => message.role === "tool")?.content).toBe(JSON.stringify({ success: true, message: "already published" }));
+		yield { type: "done" as const };
+	} });
+	try {
+		const events = await collect(createAgentRuntime({ ...c, approval: { preflight: () => ({ action, reason: "Changed policy" }) }, tools: [{ name: "edit", description: "edit", parameters: { type: "object" }, execute: async () => { effects++; return { success: true, message: "duplicate" }; } }] }).resume("crash"));
+		expect(events.at(-1)?.type).toBe("run_completed");
+		expect(effects).toBe(0);
 	} finally { dispose(); }
 });

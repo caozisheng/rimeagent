@@ -9,6 +9,7 @@ const payloadKeys = {
     text_delta: ["type", "content"], tool_calls_complete: ["type", "toolCalls"],
     message_end: ["type", "usage"], error: ["type", "message"], status: ["type", "status"],
     tool_result: ["kind", "toolCall", "result"],
+    proposal: ["kind", "toolCallId", "proposalDigest", "artifactId"],
     compaction_completed: ["kind", "droppedEntries", "summaryDigest"], role_switch: ["kind", "roleId"],
 };
 function isPayload(type, value) {
@@ -36,6 +37,7 @@ function isPayload(type, value) {
             (value.status === "idle" || value.status === "thinking" || value.status === "streaming" || value.status === "error");
         case "tool_result": return Object.hasOwn(value, "toolCall") && Object.hasOwn(value, "result") && isToolCall(value.toolCall) && isToolResult(value.result);
         case "compaction_completed": return Object.hasOwn(value, "droppedEntries") && Object.hasOwn(value, "summaryDigest") && isCount(value.droppedEntries) && isId(value.summaryDigest);
+        case "proposal": return Object.hasOwn(value, "toolCallId") && isId(value.toolCallId) && Object.hasOwn(value, "proposalDigest") && isId(value.proposalDigest) && Object.hasOwn(value, "artifactId") && isId(value.artifactId);
         case "role_switch": return Object.hasOwn(value, "roleId") && isId(value.roleId);
         default: return false;
     }

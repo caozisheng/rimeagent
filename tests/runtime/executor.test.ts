@@ -3,12 +3,14 @@ import type { ToolCall } from "../../src/types";
 import type { AgentTool } from "../../src/tool-types";
 import { InMemoryArtifactStore } from "../../src/store/artifact-store";
 import { InMemoryLedger } from "../../src/runtime/ledger";
-import { createToolExecutor } from "../../src/runtime/executor";
+import { ApprovalRequiredError, createToolExecutor } from "../../src/runtime/executor";
+import type { ToolExecutorContext } from "../../src/runtime/executor";
 import { computeContextDigest } from "../../src/store/checkpoint";
 
-const call = (id = "call-1", args = '{"path":"a"}'): ToolCall => ({ id, type: "function", function: { name: "edit", arguments: args } });
-const context = (runId = "run-1") => ({ runId, nextSeq: (() => { let seq = 0; return () => ++seq; })() });
+const call = (id = "call-1", args = '{"path":"a"}', name = "edit"): ToolCall => ({ id, type: "function", function: { name, arguments: args } });
+const context = (runId = "run-1", extra: Omit<Partial<ToolExecutorContext>, "runId" | "nextSeq"> = {}) => ({ runId, nextSeq: (() => { let seq = 0; return () => ++seq; })(), ...extra });
 const tool = (execute: AgentTool["execute"], extra: Partial<AgentTool> = {}): AgentTool => ({ name: "edit", description: "edit", parameters: { type: "object" }, execute, ...extra });
+const deferred = <T>() => Promise.withResolvers<T>();
 
 describe("ToolExecutor", () => {
 	test("executes each tool call once and replays cached success", async () => {
@@ -51,7 +53,122 @@ describe("ToolExecutor", () => {
 		await ledger.append({ runId: "old", seq: 1, ts: 0, event: { kind: "tool_intent", toolCallId: pending.id, tool: "edit", argsDigest: computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [pending] }]) } });
 		let calls = 0;
 		const executor = createToolExecutor({ sessionId: "session", tools: [tool(async () => { calls++; return { success: true, message: "bad" }; }, { annotations: { readOnly: true, requiresApproval: true } })], ledger, artifactStore: new InMemoryArtifactStore() });
-		expect(await executor.execute(pending, context("run-2"))).toMatchObject({ success: false });
+		await expect(executor.execute(pending, context("run-2"))).rejects.toBeInstanceOf(ApprovalRequiredError);
 		expect(calls).toBe(0);
+	});
+	test("runs adjacent parallel reads together, preserves result order, and keeps writes isolated", async () => {
+		const firstRead = deferred<{ success: boolean; message: string }>();
+		const secondRead = deferred<{ success: boolean; message: string }>();
+		const readsStarted = deferred<void>();
+		const events: string[] = [];
+		let readStarts = 0;
+		const executor = createToolExecutor({ sessionId: "session", executor: { parallelReadOnly: true }, ledger: new InMemoryLedger(), artifactStore: new InMemoryArtifactStore(), tools: [
+			tool(async () => { events.push("write-start", "write-end"); return { success: true, message: "write" }; }, { name: "write" }),
+			tool(async () => { events.push("read-a-start"); readStarts++; if (readStarts === 2) readsStarted.resolve(); return firstRead.promise; }, { name: "read-a", annotations: { readOnly: true, executionMode: "parallel" } }),
+			tool(async () => { events.push("read-b-start"); readStarts++; if (readStarts === 2) readsStarted.resolve(); return secondRead.promise; }, { name: "read-b", annotations: { readOnly: true, executionMode: "parallel" } }),
+		] });
+		const batch = executor.executeBatch([call("write-before", "{}", "write"), call("read-a", "{}", "read-a"), call("read-b", "{}", "read-b"), call("write-after", "{}", "write")], context());
+		await readsStarted.promise;
+		expect(events).toEqual(["write-start", "write-end", "read-a-start", "read-b-start"]);
+		secondRead.resolve({ success: true, message: "second" });
+		firstRead.resolve({ success: true, message: "first" });
+		expect((await batch).map(result => result.message)).toEqual(["write", "first", "second", "write"]);
+		expect(events).toEqual(["write-start", "write-end", "read-a-start", "read-b-start", "write-start", "write-end"]);
+	});
+
+	test("treats undo as an exclusive barrier even when its annotations permit parallel reads", async () => {
+		const before = deferred<{ success: boolean; message: string }>();
+		const undo = deferred<{ success: boolean; message: string }>();
+		const afterStarted = deferred<void>();
+		const beforeStarted = deferred<void>();
+		const undoStarted = deferred<void>();
+		const executor = createToolExecutor({ sessionId: "session", executor: { parallelReadOnly: true }, ledger: new InMemoryLedger(), artifactStore: new InMemoryArtifactStore(), tools: [
+			tool(async () => { beforeStarted.resolve(); return before.promise; }, { name: "read-before", annotations: { readOnly: true, executionMode: "parallel" } }),
+			tool(async () => { undoStarted.resolve(); return undo.promise; }, { name: "undo", annotations: { readOnly: true, executionMode: "parallel" } }),
+			tool(async () => { afterStarted.resolve(); return { success: true, message: "after" }; }, { name: "read-after", annotations: { readOnly: true, executionMode: "parallel" } }),
+		] });
+		const batch = executor.executeBatch([call("before", "{}", "read-before"), call("undo", "{}", "undo"), call("after", "{}", "read-after")], context());
+		await beforeStarted.promise;
+		before.resolve({ success: true, message: "before" });
+		await undoStarted.promise;
+		let afterRan = false;
+		afterStarted.promise.then(() => { afterRan = true; });
+		await Promise.resolve();
+		expect(afterRan).toBe(false);
+		undo.resolve({ success: true, message: "undone" });
+		await afterStarted.promise;
+		expect((await batch).map(result => result.message)).toEqual(["before", "undone", "after"]);
+	});
+
+	test("settles every parallel read when one provider read fails and propagates storage faults", async () => {
+		const sibling = deferred<{ success: boolean; message: string }>();
+		const siblingStarted = deferred<void>();
+		const executor = createToolExecutor({ sessionId: "session", executor: { parallelReadOnly: true }, ledger: new InMemoryLedger(), artifactStore: new InMemoryArtifactStore(), tools: [
+			tool(async () => { throw new Error("read failed"); }, { name: "fails", annotations: { readOnly: true, executionMode: "parallel" } }),
+			tool(async () => { siblingStarted.resolve(); return sibling.promise; }, { name: "sibling", annotations: { readOnly: true, executionMode: "parallel" } }),
+		] });
+		const batch = executor.executeBatch([call("fails", "{}", "fails"), call("sibling", "{}", "sibling")], context());
+		await siblingStarted.promise;
+		sibling.resolve({ success: true, message: "sibling" });
+		expect((await batch).map(result => result.success)).toEqual([false, true]);
+
+		const baseStore = new InMemoryArtifactStore();
+		const brokenStore = { get: baseStore.get.bind(baseStore), list: baseStore.list.bind(baseStore), put: async () => { throw new Error("storage unavailable"); } };
+		const storageExecutor = createToolExecutor({ sessionId: "storage", ledger: new InMemoryLedger(), artifactStore: brokenStore, tools: [tool(async () => ({ success: true, message: "read" }), { annotations: { readOnly: true, executionMode: "parallel" } })] });
+		await expect(storageExecutor.executeBatch([call("storage-fault")], context())).rejects.toThrow("storage unavailable");
+	});
+
+	test("preflights before intents or effects and exposes structured suspension", async () => {
+		let effects = 0;
+		const calls: ToolCall[] = [];
+		const ledger = new InMemoryLedger();
+		const executor = createToolExecutor({ sessionId: "session", ledger, artifactStore: new InMemoryArtifactStore(), approval: { async preflight(input) {
+			calls.push(input.toolCall);
+			expect(input).toMatchObject({ runId: "run-1", projectId: "project", projectRevision: 4, annotations: { requiresApproval: true } });
+			return { action: "suspend", reason: "review" };
+		} }, tools: [tool(async () => { effects++; return { success: true, message: "unsafe" }; }, { annotations: { requiresApproval: true } })] });
+		const pending = call("needs-review");
+		await expect(executor.executeBatch([pending], context("run-1", { projectFacts: () => ({ projectId: "project", projectRevision: 4, digest: "facts", producedBy: "host" }) }))).rejects.toBeInstanceOf(ApprovalRequiredError);
+		expect(effects).toBe(0);
+		expect((await ledger.query("run-1")).some(record => record.event.kind === "tool_intent")).toBe(false);
+		await expect(executor.execute(pending, context("run-1", { projectFacts: () => ({ projectId: "project", projectRevision: 4, digest: "facts", producedBy: "host" }) }))).rejects.toBeInstanceOf(ApprovalRequiredError);
+		expect(calls).toHaveLength(2);
+	});
+	test("returns only the completed serial prefix after cancellation", async () => {
+		const controller = new AbortController();
+		let secondStarted = false;
+		const executor = createToolExecutor({ sessionId: "session", ledger: new InMemoryLedger(), artifactStore: new InMemoryArtifactStore(), tools: [
+			tool(async () => { controller.abort(); return { success: true, message: "first" }; }, { name: "first" }),
+			tool(async () => { secondStarted = true; return { success: true, message: "second" }; }, { name: "second" }),
+		] });
+		const results = await executor.executeBatch([call("first", "{}", "first"), call("second", "{}", "second")], context("run-1", { signal: controller.signal }));
+		expect(results).toEqual([{ success: true, message: "first" }]);
+		expect(secondStarted).toBe(false);
+	});
+
+	test("honors only exact durable approvals and returns deterministic denied results", async () => {
+		let effects = 0;
+		const ledger = new InMemoryLedger();
+		const executor = createToolExecutor({ sessionId: "session", ledger, artifactStore: new InMemoryArtifactStore(), approval: { preflight: () => { throw new Error("unexpected gate call"); } }, tools: [
+			tool(async () => { effects++; return { success: true, message: "published" }; }, { name: "publish", annotations: { destructive: true } }),
+		] });
+		const results = await executor.executeBatch([call("allowed", "{}", "publish"), call("denied", "{}", "publish")], context("run-1", { approvalDecisions: { allowed: "allow", denied: "deny" } }));
+		expect(results).toEqual([{ success: true, message: "published" }, { success: false, message: "approval_denied" }]);
+		expect(effects).toBe(1);
+		expect((await ledger.query("run-1")).filter(record => record.event.kind === "tool_intent")).toHaveLength(1);
+	});
+
+	test("preserves the global intent claim when executors race on the same call", async () => {
+		let effects = 0;
+		const ledger = new InMemoryLedger();
+		const artifactStore = new InMemoryArtifactStore();
+		const options = { sessionId: "session", ledger, artifactStore, tools: [tool(async () => { effects++; return { success: true, message: "ok" }; })] };
+		const first = createToolExecutor(options);
+		const second = createToolExecutor(options);
+		const settled = await Promise.allSettled([first.execute(call("global-call"), context("run-one")), second.execute(call("global-call"), context("run-two"))]);
+		expect(settled.filter(item => item.status === "fulfilled")).toHaveLength(1);
+		expect(settled.filter(item => item.status === "rejected")).toHaveLength(1);
+		expect(effects).toBe(1);
+		expect((await ledger.query("run-one")).concat(await ledger.query("run-two")).filter(record => record.event.kind === "tool_intent")).toHaveLength(1);
 	});
 });

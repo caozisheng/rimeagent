@@ -51,7 +51,7 @@ export function isLedgerRecord(value) {
             return Object.hasOwn(event, "toolCallId") && Object.hasOwn(event, "decision") && isId(event.toolCallId)
                 && (event.decision === "allow" || event.decision === "deny" || event.decision === "suspend");
         case "terminal":
-            return event.status === "completed" || event.status === "failed" || event.status === "interrupted";
+            return event.status === "completed" || event.status === "failed" || event.status === "interrupted" || event.status === "awaiting_approval";
         case "compaction":
         case "cancellation":
             return event.detail === undefined || typeof event.detail === "string";
