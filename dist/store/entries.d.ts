@@ -1,7 +1,8 @@
 import type { AgentErrorCategory, NormalizedError } from "../errors";
 import type { AgentToolResult } from "../tool-types";
+import type { ExternalStateBinding } from "../tool-types";
 import type { TokenUsage, ToolCall } from "../types";
-import type { ProjectFactsDigest } from "../runtime/context-manager";
+import type { AuthoritativeContext } from "../runtime/context-manager";
 import { isAgentSessionEntry } from "./validation";
 export { isAgentSessionEntry };
 export type AgentSessionEntry = {
@@ -30,6 +31,7 @@ export type AgentSessionEntry = {
     toolCallId: string;
     result: AgentToolResult;
     artifactId?: string;
+    legacyResult?: true;
 } | {
     kind: "approval_requested";
     id: string;
@@ -38,8 +40,7 @@ export type AgentSessionEntry = {
     reason: string;
     runId?: string;
     argsDigest?: string;
-    projectId?: string;
-    projectRevision?: number;
+    externalStateBinding?: ExternalStateBinding;
     proposalDigest?: string;
     artifactId?: string;
 } | {
@@ -65,13 +66,12 @@ export type AgentSessionEntry = {
     ts: number;
     summary: string;
     compactedEntryIds: string[];
-    projectDigest: ProjectFactsDigest;
+    authoritativeContext?: AuthoritativeContext;
 } | {
     kind: "checkpoint";
     id: string;
     ts: number;
     checkpointId: string;
-    projectRevision?: number;
 } | {
     kind: "branch";
     id: string;

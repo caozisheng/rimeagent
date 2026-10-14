@@ -1,4 +1,5 @@
 import type { AgentMessage } from "../types";
+import type { ExternalStateBinding } from "../tool-types";
 export interface AgentCheckpoint {
     readonly checkpointId: string;
     readonly sessionId: string;
@@ -9,16 +10,12 @@ export interface AgentCheckpoint {
     readonly label?: string;
     readonly runId?: string;
     readonly seq?: number;
-    readonly projectId?: string;
-    readonly projectRevision?: number;
-    readonly projectCheckpointId?: string;
+    readonly externalStateBinding?: ExternalStateBinding;
 }
 export interface AgentCheckpointRef {
     readonly checkpointId: string;
     readonly sessionId: string;
-    readonly projectId?: string;
-    readonly projectRevision?: number;
-    readonly projectCheckpointId?: string;
+    readonly externalStateBinding?: ExternalStateBinding;
     readonly contextDigest: string;
 }
 /** References an agent history branch, never a project restore operation. */

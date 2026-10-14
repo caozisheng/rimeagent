@@ -4,7 +4,7 @@ import { isId } from "../store/validation";
 import { normalizeError } from "../errors";
 import { contextBudget, createTokenCounter, serializeContextRequest, throwIfContextAborted, validateContextConfig } from "./context-budget";
 import { chooseContextCut, loadContextHistory } from "./context-history";
-import { contextSummaryDigest, contextSystemMessages, currentProjectFacts, summarySystemMessage, validateContextSummary } from "./context-summary";
+import { contextSummaryDigest, contextSystemMessages, currentAuthoritativeContext, summarySystemMessage, validateContextSummary } from "./context-summary";
 import { prepareContextMessages } from "./context-tools";
 export function createContextManager(options) {
     if (!isId(options.sessionId))
@@ -18,7 +18,7 @@ export function createContextManager(options) {
     const project = async (input) => {
         throwIfContextAborted(input.signal);
         const budget = getBudget(input.llmConfig);
-        const facts = currentProjectFacts(input.projectFacts);
+        const facts = currentAuthoritativeContext(input.authoritativeContext);
         const snapshot = await options.sessionStore.load(options.sessionId);
         throwIfContextAborted(input.signal);
         if (snapshot && snapshot.sessionId !== options.sessionId)
@@ -36,7 +36,7 @@ export function createContextManager(options) {
         let tokensUsed = countTokens(serializeContextRequest(input.systemPrompt, messages, input.tools));
         let compaction;
         let droppedEntries = 0;
-        if (options.summarize && facts && (input.forceCompact || tokensUsed >= budget.triggerTokens)) {
+        if (options.summarize && (input.forceCompact || tokensUsed >= budget.triggerTokens)) {
             const checkpoints = await options.sessionStore.listCheckpoints(options.sessionId);
             throwIfContextAborted(input.signal);
             const cut = chooseContextCut(history, checkpoints, options.sessionId);
@@ -46,7 +46,8 @@ export function createContextManager(options) {
                 try {
                     result = await options.summarize({
                         ...(summary === undefined ? {} : { previousSummary: cloneJson(summary) }),
-                        messages: cloneJson(prepared.messages.slice(0, droppedEntries)), projectFacts: cloneJson(facts),
+                        messages: cloneJson(prepared.messages.slice(0, droppedEntries)),
+                        ...(facts === undefined ? {} : { authoritativeContext: cloneJson(facts) }),
                         ...(input.signal === undefined ? {} : { signal: input.signal }),
                     });
                 }
@@ -61,7 +62,7 @@ export function createContextManager(options) {
                 messages = [...contextSystemMessages(facts, summary), ...prepared.messages.slice(droppedEntries)];
                 tokensUsed = countTokens(serializeContextRequest(input.systemPrompt, messages, input.tools));
                 compaction = { id: nanoid(), ts: Date.now(), kind: "compaction", summary: canonicalJson(summary),
-                    compactedEntryIds: history.messages.slice(0, cut).map(message => message.id), projectDigest: facts };
+                    compactedEntryIds: history.messages.slice(0, cut).map(message => message.id), ...(facts === undefined ? {} : { authoritativeContext: facts }) };
             }
         }
         for (const artifact of prepared.artifacts) {

@@ -1,5 +1,6 @@
 import type { AgentErrorCategory } from "../errors";
 import type { TokenUsage } from "../types";
+import type { ExecutionReceipt } from "../tool-types";
 export type ApprovalDecision = "allow" | "deny" | "suspend";
 export interface LedgerRecord {
     readonly runId: string;
@@ -24,9 +25,7 @@ export interface LedgerRecord {
         outcome: "success" | "failure";
         messageDigest: string;
         artifactId?: string;
-        commandId?: string;
-        projectRevisionBefore?: number;
-        projectRevisionAfter?: number;
+        receipt?: ExecutionReceipt;
     } | {
         kind: "retry";
         toolCallId?: string;

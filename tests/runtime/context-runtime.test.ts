@@ -15,7 +15,7 @@ async function collect(stream: AsyncGenerator<AgentRuntimeEvent>): Promise<Agent
   return events;
 }
 function summary(goal: string) {
-  return {goal,constraints:["preserve source clips"],completedEdits:["earlier edits"],decisions:["serial edits"],failedTools:[],openQuestions:[],nextSteps:["continue current task"],references:["clip-1"]};
+  return {goal,constraints:["preserve source clips"],completedWork:["earlier edits"],decisions:["serial edits"],failedTools:[],openQuestions:[],nextSteps:["continue current task"],references:["clip-1"]};
 }
 function stores() {
   return {sessionStore:new InMemorySessionStore(),artifactStore:new InMemoryArtifactStore(),ledger:new InMemoryLedger()};
@@ -42,10 +42,10 @@ test("55 tool turns compact append-only history while preserving current facts a
     },
   });
   const config: AgentRuntimeConfig = {sessionId:"long-session",...persistence,llmConfig,expertRoleId:"general",tools:[{name:"edit",description:"edit one clip",parameters:{type:"object",properties:{}},execute:async()=>{
-    edits++;const before=revision++;return {success:true,message:"edit applied",data:{commandId:`edit-${edits}`,projectRevisionBefore:before,projectRevisionAfter:revision,rows:"full-data-".repeat(200)}};
+    edits++;const before=revision++;return {result:{success:true,message:"edit applied",data:{commandId:`edit-${edits}`,projectRevisionBefore:before,projectRevisionAfter:revision,rows:"full-data-".repeat(200)}},receipt:{operationId:`edit-${edits}`,stateChange:{before:{scopeId:"project",version:String(before)},after:{scopeId:"project",version:String(revision)}}}};
   }}],context:{contextTokens:5000,reserveOutputTokens:128,maxToolResultTokens:128},hooks:{
-    getProjectFacts:()=>({projectId:"project",projectRevision:revision,digest:`current-facts-${revision}`,summary:"clip-1 exists",producedBy:"host"}),
-    summarizeContext:input=>{summaries++;expect(input.projectFacts.producedBy).toBe("host");return summary(input.previousSummary?.goal ?? "Edit clip-1 without changing the source");},
+    getHostSnapshot:()=>({externalStateBinding:{scopeId:"project",version:String(revision)},authoritativeContext:{text:`current-facts-${revision}: clip-1 exists`,producedBy:"host"}}),
+    summarizeContext:input=>{summaries++;expect(input.authoritativeContext?.producedBy).toBe("host");return summary(input.previousSummary?.goal ?? "Edit clip-1 without changing the source");},
     buildRagContext:()=>{ragBuilds++;return "clip-1 source is immutable";},
   }};
   try {
@@ -89,7 +89,7 @@ test("context overflow escalates compaction, output cap and host tool refs befor
     else yield {type:"content_delta",delta:"completed after bounded recovery"};
     if(attempts.length>3)yield {type:"done"};
   }});
-  const config:AgentRuntimeConfig={sessionId:"overflow",...persistence,llmConfig,expertRoleId:"general",context:{reserveOutputTokens:128},tools:["edit","unneeded"].map(name=>({name,description:name,parameters:{type:"object",properties:{}},execute:async()=>{edits++;return{success:true,message:"applied"};}})),hooks:{filterTools:()=>{filters++;return["edit"];},buildRagContext:()=>{rag++;return"fresh context";}}};
+  const config:AgentRuntimeConfig={sessionId:"overflow",...persistence,llmConfig,expertRoleId:"general",context:{reserveOutputTokens:128},tools:["edit","unneeded"].map(name=>({name,description:name,parameters:{type:"object",properties:{}},execute:async()=>{edits++;return{result:{success:true,message:"applied"}};}})),hooks:{filterTools:()=>{filters++;return["edit"];},buildRagContext:()=>{rag++;return"fresh context";}}};
   try{
     const events=await collect(createAgentRuntime(config).run("edit once"));
     expect(events.at(-1)!.type).toBe("run_completed");
@@ -135,7 +135,7 @@ test("compaction storage faults propagate without being retried as provider over
     requests++;yield {type:"content_delta",delta:"confirmed older response ".repeat(50)};yield {type:"done"};
   }});
   const config:AgentRuntimeConfig = {sessionId:"compaction-store",...persistence,llmConfig,expertRoleId:"general",tools:[],hooks:{
-    getProjectFacts:()=>({projectRevision:1,digest:"facts",producedBy:"host"}),summarizeContext:()=>summary("preserve original goal"),
+    getHostSnapshot:()=>({authoritativeContext:{text:"facts",producedBy:"host"}}),summarizeContext:()=>summary("preserve original goal"),
   }};
   try {
     const initial = createAgentRuntime(config);

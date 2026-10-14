@@ -13,6 +13,7 @@ export interface AgentLLMConfig {
     /** When true, bypass the proxy and call the LLM API directly from the client. */
     directMode?: boolean;
 }
+/** Legacy runAgentLoop/runAgentSession UI-only display shape; never durable metadata. */
 export interface ToolResultSummary {
     name: string;
     success: boolean;
@@ -25,7 +26,9 @@ export interface AgentMessage {
     content: string;
     toolCalls?: ToolCall[];
     toolCallId?: string;
+    /** Legacy UI mirror only; durable session entries omit this field. */
     toolResults?: ToolResultSummary[];
+    /** Legacy UI history only; agent checkpoints do not restore host state. */
     commandCheckpoint?: number;
     createdAt: number;
 }

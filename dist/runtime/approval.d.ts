@@ -1,5 +1,6 @@
 import type { AgentToolAnnotations } from "../tool-types";
 import type { ToolCall } from "../types";
+import type { ExternalStateBinding } from "../tool-types";
 import { type JsonValue } from "../store/json";
 /** A gate outcome before a tool call can have any effect. */
 export type PreflightDecision = Readonly<{
@@ -19,8 +20,7 @@ export interface ToolCallContext {
     readonly runId: string;
     readonly toolCall: ToolCall;
     readonly annotations?: AgentToolAnnotations;
-    readonly projectId?: string;
-    readonly projectRevision?: number;
+    readonly externalStateBinding?: ExternalStateBinding;
 }
 /**
  * Approval policies only advise the runtime. The runtime persists a decision before

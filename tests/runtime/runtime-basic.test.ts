@@ -55,7 +55,7 @@ test("a fresh run does not send unresolved tool-call history to the provider", a
 		const sessionStore = new InMemorySessionStore();
 		const runtime = createAgentRuntime({ sessionId: "unfinished", sessionStore, llmConfig, expertRoleId: "general",
 			tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
-				execute: async () => { executions++; return { success: true, message: "edited" }; } }] });
+				execute: async () => { executions++; return { result: { success: true, message: "edited" } }; } }] });
 		const stream = runtime.run("edit");
 		while (true) {
 			const step = await stream.next();
@@ -79,7 +79,7 @@ test("new runtime durably suspends approval-sensitive tools without executing th
 	try {
 		const runtime = createAgentRuntime({ sessionId: "approval", sessionStore: new InMemorySessionStore(), llmConfig, expertRoleId: "general", maxIterations: 1,
 			tools: [{ name: "delete", description: "delete", parameters: { type: "object", properties: {} }, annotations: { destructive: true },
-				execute: async () => { executions++; return { success: true, message: "deleted" }; } }] });
+				execute: async () => { executions++; return { result: { success: true, message: "deleted" } }; } }] });
 		const events = [];
 		for await (const event of runtime.run("delete")) events.push(event);
 		expect(executions).toBe(0);

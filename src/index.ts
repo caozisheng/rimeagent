@@ -14,7 +14,7 @@ export type {
 } from "./types";
 
 // Tool system
-export type { AgentTool, AgentToolAnnotations, AgentToolResult, ToolSuggestion } from "./tool-types";
+export type { AgentTool, DurableAgentTool, DurableToolExecution, ExecutionReceipt, ExternalStateBinding, AgentToolAnnotations, AgentToolResult, ToolSuggestion } from "./tool-types";
 export { agentToolToDefinition } from "./tool-types";
 export type { ToolRegistryInstance } from "./tool-registry";
 export { ToolRegistry, createToolRegistry } from "./tool-registry";
@@ -48,8 +48,6 @@ export { MCPRegistry, createMCPRegistry } from "./mcp";
 // RAG types
 export type { RetrievalConfig, ToolFailure, RagBuilder, ErrorRecoveryBuilder } from "./rag-types";
 
-// Tool context types
-export type { ToolContext, ToolFactory } from "./tool-context-types";
 
 // Skill knowledge types
 export type { SkillKnowledgeEntry, AgentSkillWithKnowledge } from "./skill-types";
@@ -69,6 +67,8 @@ export { isAgentSessionEntry, serializeAgentSessionEntry, parseAgentSessionEntry
 export type { AgentSessionEntry, AgentSessionSnapshot } from "./store/entries";
 export { InMemorySessionStore } from "./store/session-store";
 export type { AgentSessionStore } from "./store/session-store";
+export { AGENT_STORE_SCHEMA_VERSION, convertLegacyCheckpoint, convertLegacyEntry, convertLegacyLedger, convertLegacySession } from "./store/schema-migration";
+export type { LegacySessionGroup } from "./store/schema-migration";
 export { computeContextDigest } from "./store/checkpoint";
 export type { AgentCheckpoint, AgentCheckpointRef, AgentBranch } from "./store/checkpoint";
 export { InMemoryArtifactStore } from "./store/artifact-store";
@@ -83,7 +83,7 @@ export { createDefaultApprovalGate, computeProposalDigest, validateProposalDecis
 export type { ApprovalGate, ApprovalResolution, PreflightDecision, ToolCallContext, DefaultApprovalGateOptions } from "./runtime/approval";
 export { createContextManager } from "./runtime/context-manager";
 export type {
-	ContextManagerConfig, ContextProjection, ProjectFactsDigest, ContextManager, ContextManagerOptions,
+	ContextManagerConfig, ContextProjection, HostSnapshot, AuthoritativeContext, ContextManager, ContextManagerOptions,
 	ContextProjectInput, ContextBudget, ContextSummary, SummarizeContextInput, ContextSummarizer,
 } from "./runtime/context-manager";
 

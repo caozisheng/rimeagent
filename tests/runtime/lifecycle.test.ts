@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createAgentRuntime, InMemorySessionStore, registerLLMBackendFor } from "../../src/index";
-import type { AgentRuntimeConfig, AgentTool, LLMBackend, OpenAIMessage, StreamChunk, ToolCall } from "../../src/index";
+import type { AgentRuntimeConfig, DurableAgentTool, LLMBackend, OpenAIMessage, StreamChunk, ToolCall } from "../../src/index";
 import type { AgentSessionEntry } from "../../src/store/entries";
 
 interface EventShape {
@@ -121,11 +121,11 @@ describe("AgentRuntime lifecycle", () => {
 		const model = "lifecycle-cap";
 		const store = new InMemorySessionStore();
 		let executions = 0;
-		const tool: AgentTool = {
+		const tool: DurableAgentTool = {
 			name: "once",
 			description: "once",
 			parameters: { type: "object", properties: {} },
-			execute: async () => { executions++; return { success: true, message: "ok" }; },
+			execute: async () => { executions++; return { result: { success: true, message: "ok" } }; },
 		};
 		const mock = installBackend(model, toolTurn([call("call-once", "once")]));
 		try {
@@ -145,13 +145,13 @@ describe("AgentRuntime lifecycle", () => {
 		const order: string[] = [];
 		const failures: string[] = [];
 		const seenSystemPrompts: string[] = [];
-		const tools: AgentTool[] = ["first", "second"].map((name, index) => ({
+		const tools: DurableAgentTool[] = ["first", "second"].map((name, index) => ({
 			name,
 			description: name,
 			parameters: { type: "object", properties: {} },
 			execute: async () => {
 				order.push(name);
-				return index === 0 ? { success: false, message: "first failed" } : { success: true, message: "second ok" };
+				return { result: index === 0 ? { success: false, message: "first failed" } : { success: true, message: "second ok" } };
 			},
 		}));
 		const mock = installBackend(model, async function* (messages, _signal, request) {
@@ -215,9 +215,9 @@ describe("AgentRuntime lifecycle", () => {
 		const controller = new AbortController();
 		controller.abort();
 		let toolCalls = 0;
-		const tool: AgentTool = { name: "never", description: "never", parameters: { type: "object", properties: {} }, execute: async () => {
+		const tool: DurableAgentTool = { name: "never", description: "never", parameters: { type: "object", properties: {} }, execute: async () => {
 			toolCalls++;
-			return { success: true, message: "unexpected" };
+			return { result: { success: true, message: "unexpected" } };
 		} };
 		const mock = installBackend(model, textTurn("allowed later"));
 		try {
@@ -280,14 +280,14 @@ describe("AgentRuntime lifecycle", () => {
 		const toolStarted = Promise.withResolvers<void>();
 		const toolReleased = Promise.withResolvers<void>();
 		const calls: string[] = [];
-		const tools: AgentTool[] = ["slow", "later"].map(name => ({
+		const tools: DurableAgentTool[] = ["slow", "later"].map(name => ({
 			name,
 			description: name,
 			parameters: { type: "object", properties: {} },
 			execute: async () => {
 				calls.push(name);
 				if (name === "slow") { toolStarted.resolve(); await toolReleased.promise; }
-				return { success: true, message: name };
+				return { result: { success: true, message: name } };
 			},
 		}));
 		const mock = installBackend(model, toolTurn([call("call-slow", "slow"), call("call-later", "later")]));

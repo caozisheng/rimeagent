@@ -68,7 +68,7 @@ describe("durable runtime resume", () => {
 		} });
 		try {
 			const runtime = createAgentRuntime({ ...config, tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
-				execute: async () => { executions++; return { success: true, message: "ok" }; } }] });
+				execute: async () => { executions++; return { result: { success: true, message: "ok" } }; } }] });
 			const interrupted = await stopAt(runtime.run("edit twice"), boundary);
 			await collect(runtime.resume(interrupted.runId));
 			expect(executions).toBe(2);
@@ -121,7 +121,7 @@ describe("durable runtime resume", () => {
 		let projectRevision = 1;
 		let projectId = "project";
 		let requests = 0;
-		const config: AgentRuntimeConfig = { ...base, hooks: { getProjectFacts: () => ({ projectId, projectRevision, digest: "facts", producedBy: "host" }) } };
+		const config: AgentRuntimeConfig = { ...base, hooks: { getHostSnapshot: () => ({ authoritativeContext: { text: "facts", producedBy: "host" }, externalStateBinding: { scopeId: projectId, version: String(projectRevision) } }) } };
 		const dispose = registerLLMBackendFor(c => c === config.llmConfig, { type: "mismatch", async *streamChat(): AsyncGenerator<StreamChunk> {
 			requests++; yield { type: "content_delta", delta: "partial" }; yield { type: "done" };
 		} });
@@ -167,7 +167,7 @@ test("cancellation during the first tool preserves its successful result before 
 	const config: AgentRuntimeConfig = { ...base, tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} }, execute: async () => {
 		executions++;
 		if (executions === 1) { entered.resolve(); await release.promise; }
-		return { success: true, message: "edited" };
+		return { result: { success: true, message: "edited" } };
 	} }] };
 	const dispose = registerLLMBackendFor(c => c === config.llmConfig, { type: "during", async *streamChat(): AsyncGenerator<StreamChunk> {
 		if (++requests === 1) yield { type: "tool_calls_complete", toolCalls: [call("during-a"), call("during-b")] };
@@ -192,7 +192,7 @@ test("resuming an exhausted cap completes without requesting another model turn"
 	let requests = 0;
 	let executions = 0;
 	const config: AgentRuntimeConfig = { ...base, maxIterations: 1, tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
-		execute: async () => { executions++; return { success: true, message: "ok" }; } }] };
+		execute: async () => { executions++; return { result: { success: true, message: "ok" } }; } }] };
 	const dispose = registerLLMBackendFor(c => c === config.llmConfig, { type: "cap", async *streamChat(): AsyncGenerator<StreamChunk> {
 		requests++; yield { type: "tool_calls_complete", toolCalls: [call("cap-call")] }; yield { type: "done" };
 	} });
@@ -236,7 +236,7 @@ test("a session result append failure after ledger commit rejects and never reco
 	}
 	const base = setup("result-failure");
 	const config: AgentRuntimeConfig = { ...base, sessionStore: new FailResultStore(), tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
-		execute: async () => ({ success: true, message: "edited" }) }] };
+		execute: async () => ({ result: { success: true, message: "edited" } }) }] };
 	const dispose = registerLLMBackendFor(c => c === config.llmConfig, { type: "failure", async *streamChat(): AsyncGenerator<StreamChunk> {
 		yield { type: "tool_calls_complete", toolCalls: [call("failure-call")] }; yield { type: "done" };
 	} });
@@ -281,7 +281,7 @@ test("resumed model iteration receives failures reconstructed from the confirmed
 	const config: AgentRuntimeConfig = { ...base, hooks: { buildErrorRecovery: received => {
 		failures.push(...received.map(failure => failure.toolName)); return "repair the failed edit";
 	} }, tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
-		execute: async () => ({ success: false, message: "failed edit" }) }] };
+		execute: async () => ({ result: { success: false, message: "failed edit" } }) }] };
 	const dispose = registerLLMBackendFor(c => c === config.llmConfig, { type: "failures", async *streamChat(_config, messages): AsyncGenerator<StreamChunk> {
 		if (++requests === 1) yield { type: "tool_calls_complete", toolCalls: [call("failed-context-call")] };
 		else expect(JSON.stringify(messages)).toContain("repair the failed edit");

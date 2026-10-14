@@ -1,5 +1,6 @@
 import type { AgentToolAnnotations } from "../tool-types";
 import type { ToolCall } from "../types";
+import type { ExternalStateBinding } from "../tool-types";
 import { computeContextDigest } from "../store/checkpoint";
 import { canonicalJson, cloneJson, isJsonValue, type JsonValue } from "../store/json";
 import { hasOnlyKeys, isRecord } from "../store/validation";
@@ -17,8 +18,7 @@ export interface ToolCallContext {
 	readonly runId: string;
 	readonly toolCall: ToolCall;
 	readonly annotations?: AgentToolAnnotations;
-	readonly projectId?: string;
-	readonly projectRevision?: number;
+	readonly externalStateBinding?: ExternalStateBinding;
 }
 
 /**

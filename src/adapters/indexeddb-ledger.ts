@@ -59,7 +59,8 @@ export class IndexedDBLedger implements RuntimeLedger {
 			const key = claim?.successful ?? claim?.latest ?? claim?.intent;
 			if (!key) return null;
 			const value: unknown = await request(transaction.objectStore("ledger").get(key));
-			if (!isLedgerRecord(value)) throw new TypeError("Invalid persisted execution record");
+			if (!isLedgerRecord(value) || value.runId !== key[0] || value.seq !== key[1]
+				|| (value.event.kind !== "tool_exec" && value.event.kind !== "tool_intent") || value.event.toolCallId !== toolCallId) throw new TypeError("Invalid persisted execution record");
 			return cloneJson(value);
 		});
 	}

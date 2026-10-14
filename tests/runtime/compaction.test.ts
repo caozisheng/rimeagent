@@ -8,9 +8,9 @@ import { RuntimeHistory, projectMessages } from "../../src/runtime/history";
 import { computeContextDigest } from "../../src/store/checkpoint";
 
 const llmConfig = { baseUrl: "https://compaction.invalid", apiKey: "secret", model: "compaction" };
-const facts = { projectRevision: 7, digest: "current-project", summary: "Current project truth", producedBy: "host" as const };
-const input = { llmConfig, systemPrompt: "instructions", tools: [], projectFacts: facts, forceCompact: true };
-const summary: ContextSummary = { goal: "Keep editing", constraints: ["Do not lose user intent"], completedEdits: ["old edit"], decisions: [], failedTools: [], openQuestions: [], nextSteps: ["latest request"], references: ["artifact:old"] };
+const facts = { text: "Current project truth", producedBy: "host" as const };
+const input = { llmConfig, systemPrompt: "instructions", tools: [], authoritativeContext: facts, forceCompact: true };
+const summary: ContextSummary = { goal: "Keep editing", constraints: ["Do not lose user intent"], completedWork: ["old edit"], decisions: [], failedTools: [], openQuestions: [], nextSteps: ["latest request"], references: ["artifact:old"] };
 async function fixture(turns = 3) {
 	const sessionStore = new InMemorySessionStore();
 	const artifactStore = new InMemoryArtifactStore();
@@ -41,7 +41,7 @@ async function fixture(turns = 3) {
 	expect(projected.messages.find(message => message.toolCalls)?.toolCalls![0]!.id).toBe("call-54");
 	expect(projected.messages.find(message => message.role === "tool")!.toolCallId).toBe("call-54");
 	expect(calls).toHaveLength(1);
-	expect(calls[0]!.projectFacts).toEqual(facts);
+	expect(calls[0]!.authoritativeContext).toEqual(facts);
 	expect(calls[0]!.messages.some(message => message.content.startsWith("goal 54"))).toBe(false);
 	const after = (await options.sessionStore.load(options.sessionId))!.entries;
 	expect(after.slice(0, before.length)).toEqual(before);
@@ -57,7 +57,7 @@ async function fixture(turns = 3) {
  test("repeated compaction accumulates prefix IDs and supplies previous summary without replaying it as authoritative facts", async () => {
 	const options = await fixture();
 	const calls: SummarizeContextInput[] = [];
-	const summarize: ContextSummarizer = value => { calls.push(value); return { ...summary, completedEdits: [`summary ${calls.length}`] }; };
+	const summarize: ContextSummarizer = value => { calls.push(value); return { ...summary, completedWork: [`summary ${calls.length}`] }; };
 	await createContextManager({ ...options, summarize }).project(input);
 	const first = (await options.sessionStore.load(options.sessionId))!.entries.at(-1)!;
 	await options.history.append({ kind: "user_message", content: "new goal" });
@@ -65,19 +65,19 @@ async function fixture(turns = 3) {
 	await options.history.append({ kind: "tool_result", toolCallId: "new-call", result: { success: true, message: "new edit" } });
 	await options.history.append({ kind: "assistant_message", content: "new complete response" });
 	await options.history.checkpoint();
-	const freshFacts = { ...facts, projectRevision: 8, digest: "fresh", summary: "Fresh host truth" };
-	const second = await createContextManager({ ...options, summarize }).project({ ...input, projectFacts: freshFacts });
+	const freshFacts = { ...facts, text: "Fresh host truth" };
+	const second = await createContextManager({ ...options, summarize }).project({ ...input, authoritativeContext: freshFacts });
 	const entries = (await options.sessionStore.load(options.sessionId))!.entries;
 	const latest = entries.at(-1)!;
 	if (first.kind !== "compaction" || latest.kind !== "compaction") throw new Error("Missing compactions");
 	expect(latest.compactedEntryIds.slice(0, first.compactedEntryIds.length)).toEqual(first.compactedEntryIds);
 	expect(latest.compactedEntryIds.length).toBeGreaterThan(first.compactedEntryIds.length);
-	expect(calls[1]!.previousSummary!.completedEdits).toEqual(["summary 1"]);
+	expect(calls[1]!.previousSummary!.completedWork).toEqual(["summary 1"]);
 	expect(calls[1]!.messages.some(message => first.compactedEntryIds.includes(message.id))).toBe(false);
 	expect(second.messages[0]!.content).toContain("Fresh host truth");
 	expect(second.messages[0]!.content).not.toContain("summary 1");
 	expect(second.messages[1]!.content).toContain("summary 2");
-	const reopened = await createContextManager({ ...options, summarize }).project({ ...input, projectFacts: freshFacts, forceCompact: false });
+	const reopened = await createContextManager({ ...options, summarize }).project({ ...input, authoritativeContext: freshFacts, forceCompact: false });
 	expect(reopened.messages).toEqual(second.messages);
 	expect(reopened.compacted).toBe(false);
 });
@@ -95,16 +95,18 @@ test("a trailing pending batch cannot displace protection of the latest complete
 	expect(projected.messages.find(message => message.role === "tool")!.toolCallId).toBe("complete");
 });
 
- test("without current facts, host summarizer or a safe checkpoint there is no fake compaction", async () => {
+test("without current facts compaction still proceeds, but a missing summarizer or checkpoint prevents it", async () => {
 	for (const absent of ["facts", "summarizer", "checkpoint"] as const) {
 		const options = await fixture();
 		const before = await options.sessionStore.load(options.sessionId);
 		const store = absent === "checkpoint" ? { load: options.sessionStore.load.bind(options.sessionStore), append: options.sessionStore.append.bind(options.sessionStore), saveCheckpoint: options.sessionStore.saveCheckpoint.bind(options.sessionStore), listCheckpoints: async () => [] } : options.sessionStore;
 		const manager = createContextManager({ ...options, sessionStore: store, ...(absent === "summarizer" ? {} : { summarize: () => summary }) });
-		const projected = await manager.project({ ...input, ...(absent === "facts" ? { projectFacts: undefined } : {}) });
-		expect(projected.compacted).toBe(false);
-		expect(projected.messages.filter(message => message.role !== "system")).toEqual(projectMessages(before!.entries));
-		expect(await options.sessionStore.load(options.sessionId)).toEqual(before);
+		const projected = await manager.project({ ...input, ...(absent === "facts" ? { authoritativeContext: undefined } : {}) });
+		expect(projected.compacted).toBe(absent === "facts");
+		if (absent !== "facts") {
+			expect(projected.messages.filter(message => message.role !== "system")).toEqual(projectMessages(before!.entries));
+			expect(await options.sessionStore.load(options.sessionId)).toEqual(before);
+		}
 	}
 });
 
@@ -162,7 +164,7 @@ test("invalid host summary does not commit staged oversized tool artifacts", asy
 		const options = await fixture();
 		const messages = projectMessages((await options.sessionStore.load(options.sessionId))!.entries);
 		const ids = mode === "nonprefix" ? [messages[1]!.id] : mode === "future" ? ["future-id"] : messages.slice(0, 2).map(message => message.id);
-		const entry: AgentSessionEntry = { kind: "compaction", id: "corrupt", ts: 0, summary: JSON.stringify(summary), compactedEntryIds: ids, projectDigest: facts };
+		const entry: AgentSessionEntry = { kind: "compaction", id: "corrupt", ts: 0, summary: JSON.stringify(summary), compactedEntryIds: ids, authoritativeContext: facts };
 		await options.sessionStore.append(options.sessionId, entry);
 		await expect(createContextManager({ ...options, summarize: () => summary }).project(input)).rejects.toThrow();
 	}

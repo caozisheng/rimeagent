@@ -113,13 +113,13 @@ describe("InMemorySessionStore", () => {
 		expect(await store.listCheckpoints("s1")).toEqual([checkpoint()]);
 	});
 
-	test("preserves isolated recovery and project bindings on durable checkpoints", async () => {
+	test("preserves isolated recovery and opaque state bindings on durable checkpoints", async () => {
 		const store = new InMemorySessionStore();
-		const input = checkpoint({ runId: "run-1", seq: 12, projectId: "project-1", projectRevision: 7, projectCheckpointId: "host-cp-1" });
+		const input = checkpoint({ runId: "run-1", seq: 12, externalStateBinding: { scopeId: "resource", version: "etag-A" } });
 		await store.saveCheckpoint(input);
-		Reflect.set(input, "projectRevision", 99);
+		Reflect.set(input, "externalStateBinding", { scopeId: "resource", version: "etag-B" });
 		const saved = (await store.listCheckpoints("s1"))[0]!;
-		expect(saved).toMatchObject({ runId: "run-1", seq: 12, projectId: "project-1", projectRevision: 7, projectCheckpointId: "host-cp-1" });
+		expect(saved).toMatchObject({ runId: "run-1", seq: 12, externalStateBinding: { scopeId: "resource", version: "etag-A" } });
 		Reflect.set(saved, "seq", 999);
 		expect((await store.listCheckpoints("s1"))[0]!.seq).toBe(12);
 	});
@@ -160,7 +160,7 @@ describe("InMemorySessionStore", () => {
 		{ checkpointId: "" }, { sessionId: "" }, { parentId: "" }, { entrySeq: -1 }, { entrySeq: 0.5 },
 		{ entrySeq: Number.MAX_SAFE_INTEGER + 1 }, { createdAt: NaN }, { createdAt: -1 },
 		{ contextDigest: "" }, { apiKey: "secret" },
-		{ runId: "" }, { seq: 0 }, { seq: 1.5 }, { projectId: "" }, { projectRevision: -1 }, { projectRevision: 0.5 }, { projectCheckpointId: "" },
+		{ runId: "" }, { seq: 0 }, { seq: 1.5 }, { externalStateBinding: { scopeId: "", version: "v" } }, { externalStateBinding: { scopeId: "s", version: "" } },
 	])("rejects malformed checkpoint fields: %j", async changes => {
 		const store = new InMemorySessionStore();
 		await expect(store.saveCheckpoint(checkpoint(changes))).rejects.toThrow();

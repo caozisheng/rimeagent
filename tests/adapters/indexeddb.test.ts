@@ -17,7 +17,7 @@ const record = (seq: number, event: LedgerRecord["event"], runId = "run"): Ledge
 const intent: LedgerRecord["event"] = { kind: "tool_intent", toolCallId: "call", tool: "edit", argsDigest: "digest" };
 const execution: LedgerRecord["event"] = {
 	kind: "tool_exec", toolCallId: "call", tool: "edit", argsDigest: "digest", outcome: "success",
-	messageDigest: "message", artifactId: "artifact", commandId: "command", projectRevisionBefore: 0, projectRevisionAfter: 1,
+	messageDigest: "message", artifactId: "artifact", receipt: { operationId: "command", stateChange: { before: { scopeId: "p", version: "0" }, after: { scopeId: "p", version: "1" } } },
 };
 
 function fixture() {
@@ -33,8 +33,8 @@ const entries: AgentSessionEntry[] = [
 	{ kind: "tool_result", id: "tool-result", ts: 1, toolCallId: "call", result: { success: true, message: "done", data: { nested: [1] } }, artifactId: "artifact" },
 	{ kind: "approval_requested", id: "requested", ts: 1, toolCallId: "call", reason: "danger" },
 	{ kind: "approval_resolved", id: "resolved", ts: 1, toolCallId: "call", decision: "allow", by: "user" },
-	{ kind: "compaction", id: "compaction", ts: 1, summary: "summary", compactedEntryIds: ["entry"], projectDigest: { producedBy: "host", digest: "project", projectId: "p", projectRevision: 1 } },
-	{ kind: "checkpoint", id: "checkpoint", ts: 1, checkpointId: "root", projectRevision: 1 },
+	{ kind: "compaction", id: "compaction", ts: 1, summary: "summary", compactedEntryIds: ["entry"], authoritativeContext: { producedBy: "host", text: "Current facts" } },
+	{ kind: "checkpoint", id: "checkpoint", ts: 1, checkpointId: "root" },
 	{ kind: "branch", id: "branch", ts: 1, fromCheckpointId: "root", branchId: "branch" },
 	{ kind: "run_started", id: "started", ts: 1, runId: "run", parentRunId: "prior" },
 	{ kind: "run_state", id: "state", ts: 1, runId: "run", seq: 4, iteration: 1, phase: "tools", activeRoleId: "role", checkpointId: "root" },
@@ -60,7 +60,7 @@ describe("IndexedDB stores", () => {
 		await bundle.sessionStore.saveCheckpoint(checkpoint());
 		expect(await bundle.sessionStore.load("s")).toEqual({ sessionId: "s", entries: [] });
 		for (const value of entries) await bundle.sessionStore.append("s", value);
-		const child = checkpoint({ checkpointId: "a-child", parentId: "root", entrySeq: entries.length, runId: "run", seq: 5, projectId: "p", projectRevision: 1, projectCheckpointId: "host-checkpoint" });
+		const child = checkpoint({ checkpointId: "a-child", parentId: "root", entrySeq: entries.length, runId: "run", seq: 5, externalStateBinding: { scopeId: "p", version: "1" } });
 		await bundle.sessionStore.saveCheckpoint(child);
 		await bundle.artifactStore.put(artifact({ artifactId: "z" }));
 		await bundle.artifactStore.put(artifact());
@@ -166,11 +166,11 @@ describe("IndexedDB stores", () => {
 		bundle.close();
 	});
 
-	test("validates checkpoint parents, boundaries, digest and additive project schema", async () => {
+	test("validates checkpoint parents, boundaries, digest and opaque external state binding", async () => {
 		const { open } = fixture(); const bundle = await open();
 		for (const changes of [
-			{ parentId: "missing" }, { entrySeq: 1 }, { contextDigest: "" }, { projectRevision: -1 },
-			{ projectId: "" }, { projectCheckpointId: "" }, { runId: "" }, { seq: 0 }, { extra: "private" },
+			{ parentId: "missing" }, { entrySeq: 1 }, { contextDigest: "" }, { externalStateBinding: { scopeId: "p", version: "" } },
+			{ externalStateBinding: { scopeId: "", version: "1" } }, { runId: "" }, { seq: 0 }, { extra: "private" },
 		]) await expect(bundle.sessionStore.saveCheckpoint(checkpoint(changes))).rejects.toThrow();
 		expect(await bundle.sessionStore.load("s")).toBeNull();
 		await bundle.sessionStore.append("s", entry());

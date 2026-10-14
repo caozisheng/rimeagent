@@ -5,7 +5,7 @@ import { createAgentRuntime } from "../../src/runtime/runtime";
 import { registerLLMBackendFor } from "../../src/llm-client";
 import type { AgentRuntime, AgentRuntimeConfig } from "../../src/runtime/contracts";
 import type { AgentRuntimeEvent } from "../../src/events";
-import type { AgentTool } from "../../src/tool-types";
+import type { DurableAgentTool } from "../../src/tool-types";
 
 async function collect(stream: AsyncGenerator<AgentRuntimeEvent>): Promise<AgentRuntimeEvent[]> {
   const events: AgentRuntimeEvent[] = [];
@@ -20,12 +20,12 @@ test("reopening all IndexedDB stores resumes a partial batch without replaying c
   const providerTools: string[][] = [];
   let runtime: AgentRuntime;
   let interrupt = true;
-  const tools: AgentTool[] = [1,2].map(index => ({
+  const tools: DurableAgentTool[] = [1,2].map(index => ({
     name:`edit${index}`,description:"Durable edit",parameters:{type:"object",properties:{}},
     execute:async () => {
       edits.push(index);
       if (index === 1 && interrupt) runtime.abort();
-      return {success:true,message:`edit ${index} applied`,data:{commandId:`command-${index}`,projectRevisionBefore:7,projectRevisionAfter:7}};
+      return {result:{success:true,message:`edit ${index} applied`,data:{commandId:42,projectRevisionBefore:"etag"}},receipt:{operationId:`command-${index}`}};
     },
   }));
   const dispose = registerLLMBackendFor(config => config === llmConfig, {
@@ -43,7 +43,7 @@ test("reopening all IndexedDB stores resumes a partial batch without replaying c
   });
   let stores = await createIndexedDBStores({name:"resume",indexedDB});
   const config = (): AgentRuntimeConfig => ({sessionId:"session",...stores,llmConfig,expertRoleId:"general",tools,
-    hooks:{getProjectFacts:()=>({projectId:"project",projectRevision:7,digest:"host-facts",producedBy:"host"})}});
+    hooks:{getHostSnapshot:()=>({externalStateBinding:{scopeId:"project",version:"etag"},authoritativeContext:{text:"host-facts",producedBy:"host"}})}});
   try {
     runtime = createAgentRuntime(config());
     const first = await collect(runtime.run("apply both edits"));
@@ -67,8 +67,8 @@ test("reopening all IndexedDB stores resumes a partial batch without replaying c
     expect(snapshot.entries.filter(entry=>entry.kind === "tool_result").map(entry=>entry.toolCallId)).toEqual(["idb-call-1","idb-call-2"]);
     const ledger = await stores.ledger.query(runId);
     expect(ledger.filter(record=>record.event.kind === "tool_exec").map(record=>record.event)).toMatchObject([
-      {toolCallId:"idb-call-1",commandId:"command-1",projectRevisionBefore:7,projectRevisionAfter:7},
-      {toolCallId:"idb-call-2",commandId:"command-2",projectRevisionBefore:7,projectRevisionAfter:7},
+      {toolCallId:"idb-call-1",receipt:{operationId:"command-1"}},
+      {toolCallId:"idb-call-2",receipt:{operationId:"command-2"}},
     ]);
     expect(ledger.flatMap(record=>record.event.kind === "terminal" ? [record.event.status] : [])).toEqual(["interrupted","completed"]);
     expect(JSON.stringify({snapshot,ledger,artifacts:await stores.artifactStore.list("session")})).not.toContain(llmConfig.apiKey);

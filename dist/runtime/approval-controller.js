@@ -3,6 +3,7 @@ import { computeProposalDigest } from "./approval";
 import { computeContextDigest } from "../store/checkpoint";
 import { cloneJson, isJsonValue } from "../store/json";
 import { isId } from "../store/validation";
+import { isExternalStateBinding } from "../store/validation";
 import { rejectRecovery } from "./recovery";
 import { SWITCH_ROLE_TOOL_NAME } from "../service";
 function callDigest(call) {
@@ -40,11 +41,11 @@ export function createRuntimeApproval(options) {
             rejectRecovery("Committed approval execution binding changed");
         // Cached results create no new host effect; recovery already verifies their revision chain.
         if (!committed) {
-            const facts = options.facts?.();
-            if (request.projectId !== undefined && request.projectId !== facts?.projectId)
-                rejectRecovery("Approval project identity changed");
-            if (request.projectRevision !== undefined && request.projectRevision !== facts?.projectRevision)
-                rejectRecovery("Approval project revision changed");
+            const binding = options.getHostSnapshot?.()?.externalStateBinding;
+            if (binding !== undefined && !isExternalStateBinding(binding))
+                rejectRecovery("Invalid approval host binding");
+            if (request.externalStateBinding?.scopeId !== binding?.scopeId || request.externalStateBinding?.version !== binding?.version)
+                rejectRecovery("Approval external state changed");
         }
         if ((request.proposalDigest === undefined) !== (request.artifactId === undefined))
             rejectRecovery("Approval proposal binding is incomplete");
@@ -95,15 +96,17 @@ export function createRuntimeApproval(options) {
                     await context.recordLedger({ kind: "approval", toolCallId: call.id, decision: decision.action });
                     continue;
                 }
-                const facts = options.facts?.();
+                const binding = options.getHostSnapshot?.()?.externalStateBinding;
                 let artifactId;
                 if (decision.proposal !== undefined) {
                     artifactId = nanoid();
                     await persisted(() => options.artifactStore.put({ artifactId: artifactId, sessionId: options.sessionId, contentType: "application/json", value: cloneJson(decision.proposal) }));
                 }
                 context.signal?.throwIfAborted();
+                if (binding !== undefined && !isExternalStateBinding(binding))
+                    rejectRecovery("Invalid approval host binding");
                 await options.history.append({ kind: "approval_requested", runId: context.runId, toolCallId: call.id, reason: decision.reason, argsDigest: callDigest(call),
-                    ...(facts?.projectId === undefined ? {} : { projectId: facts.projectId }), ...(facts?.projectRevision === undefined ? {} : { projectRevision: facts.projectRevision }),
+                    ...(binding === undefined ? {} : { externalStateBinding: binding }),
                     ...(artifactId === undefined ? {} : { artifactId, proposalDigest: decision.proposalDigest }) });
                 const events = [];
                 if (artifactId) {

@@ -5,10 +5,16 @@ import { InMemorySessionStore } from "../../src/store/session-store";
 import { InMemoryArtifactStore } from "../../src/store/artifact-store";
 import { InMemoryLedger } from "../../src/runtime/ledger";
 import { computeContextDigest } from "../../src/store/checkpoint";
+import { canonicalJson } from "../../src/store/json";
 import { registerLLMBackendFor } from "../../src/llm-client";
 import type { AgentRuntimeEvent } from "../../src/events";
 import type { AgentMessage, StreamChunk, ToolCall } from "../../src/types";
 import type { AgentSessionEntry } from "../../src/store/entries";
+function messageDigest(message: string): string {
+	let hash = 0x811c9dc5;
+	for (const byte of new TextEncoder().encode(canonicalJson(message))) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+	return hash.toString(16).padStart(8, "0");
+}
 
 async function collect(stream: AsyncGenerator<AgentRuntimeEvent>) {
 	const events: AgentRuntimeEvent[] = [];
@@ -37,15 +43,16 @@ test("ledger committed result repairs missing session result without executing t
 	const c = config("repair");
 	const argsDigest = await seedPending(c);
 	await c.artifactStore!.put({ artifactId: "result", sessionId: c.sessionId, contentType: "application/json", value: { success: true, message: "edited" } });
+	await c.ledger!.append({ runId: "crash", seq: 10, ts: 0, event: { kind: "tool_intent", toolCallId: toolCall.id, tool: "edit", argsDigest } });
 	await c.ledger!.append({ runId: "crash", seq: 20, ts: 0, event: { kind: "tool_exec", toolCallId: toolCall.id,
-		tool: "edit", argsDigest, outcome: "success", messageDigest: "message", artifactId: "result" } });
+		tool: "edit", argsDigest, outcome: "success", messageDigest: messageDigest("edited"), artifactId: "result" } });
 	let executions = 0;
 	const dispose = registerLLMBackendFor(x => x === c.llmConfig, { type: "repair", async *streamChat(_config, messages): AsyncGenerator<StreamChunk> {
 		expect(messages.some(message => message.role === "tool")).toBe(true); yield { type: "done" };
 	} });
 	try {
 		const events = await collect(createAgentRuntime({ ...c, tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
-			execute: async () => { executions++; return { success: true, message: "duplicate" }; } }] }).resume("crash"));
+			execute: async () => { executions++; return { result: { success: true, message: "duplicate" } }; } }] }).resume("crash"));
 		expect(executions).toBe(0);
 		expect(events.at(-1)?.type).toBe("run_completed");
 		expect((await c.sessionStore.load(c.sessionId))?.entries.filter(entry => entry.kind === "tool_result")).toHaveLength(1);
@@ -60,9 +67,8 @@ test("uncertain non-idempotent intent cannot be blindly replayed", async () => {
 	let requests = 0;
 	const dispose = registerLLMBackendFor(x => x === c.llmConfig, { type: "uncertain", async *streamChat(): AsyncGenerator<StreamChunk> { requests++; yield { type: "done" }; } });
 	try {
-		const events = await collect(createAgentRuntime({ ...c, tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
-			execute: async () => { executions++; return { success: true, message: "duplicate" }; } }] }).resume("crash"));
-		expect(events.at(-1)?.type).toBe("run_failed");
+		await expect(collect(createAgentRuntime({ ...c, tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
+			execute: async () => { executions++; return { result: { success: true, message: "duplicate" } }; } }] }).resume("crash"))).rejects.toMatchObject({ category: "tool_failure" });
 		expect(executions).toBe(0);
 		expect(requests).toBe(0);
 	} finally { dispose(); }
@@ -77,13 +83,13 @@ test("runtime shares sequence allocator with usage, host command revision and te
 		yield { type: "done", usage: { promptTokens: 2, completionTokens: 3, totalTokens: 5 } };
 	} });
 	try {
-		const events = await collect(createAgentRuntime({ ...c, hooks: { getProjectFacts: () => ({ projectId: "p", projectRevision: revision, digest: "host", producedBy: "host" }) },
+		const events = await collect(createAgentRuntime({ ...c, hooks: { getHostSnapshot: () => ({ authoritativeContext: { text: "host", producedBy: "host" }, externalStateBinding: { scopeId: "p", version: String(revision) } }) },
 			tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} }, execute: async () => {
-				revision++; return { success: true, message: "edited", data: { commandId: "command", projectRevisionBefore: 3, projectRevisionAfter: 4 } };
+				const before = revision++; return { result: { success: true, message: "edited", data: { commandId: 42, projectRevisionBefore: "etag" } }, receipt: { operationId: "command", stateChange: { before: { scopeId: "p", version: String(before) }, after: { scopeId: "p", version: String(revision) } } } };
 			} }] }).run("edit"));
 		const records = await c.ledger!.query(events[0]!.runId);
 		expect(records.filter(record => record.event.kind === "model_call")).toHaveLength(2);
-		expect(records.find(record => record.event.kind === "tool_exec")?.event).toMatchObject({ commandId: "command", projectRevisionBefore: 3, projectRevisionAfter: 4 });
+		expect(records.find(record => record.event.kind === "tool_exec")?.event).toMatchObject({ receipt: { operationId: "command", stateChange: { before: { version: "3" }, after: { version: "4" } } } });
 		expect(records.at(-1)?.event).toMatchObject({ kind: "terminal", status: "completed" });
 		const sequence = [...events.map(event => event.seq), ...records.map(record => record.seq)];
 		expect(new Set(sequence).size).toBe(sequence.length);
@@ -104,7 +110,7 @@ test("confirmed assistant committed before its checkpoint resumes the original p
 	const dispose = registerLLMBackendFor(x => x === c.llmConfig, { type: "assistant-crash", async *streamChat(): AsyncGenerator<StreamChunk> { yield { type: "done" }; } });
 	try {
 		const events = await collect(createAgentRuntime({ ...c, tools: [{ name: "edit", description: "edit", parameters: { type: "object", properties: {} },
-			execute: async () => { executions++; return { success: true, message: "edited" }; } }] }).resume("crash"));
+			execute: async () => { executions++; return { result: { success: true, message: "edited" } }; } }] }).resume("crash"));
 		expect(executions).toBe(1);
 		expect(events.at(-1)?.type).toBe("run_completed");
 	} finally { dispose(); }
@@ -127,14 +133,15 @@ test.each(["deny", "suspend"] as const)("committed autoallowed calls replay with
 	const argsDigest = await seedPending(c);
 	await c.artifactStore!.put({ artifactId: "committed", sessionId: c.sessionId, contentType: "application/json", value: { success: true, message: "already published" } });
 	await c.ledger!.append({ runId: "crash", seq: 6, ts: 0, event: { kind: "approval", toolCallId: toolCall.id, decision: "allow" } });
-	await c.ledger!.append({ runId: "crash", seq: 20, ts: 0, event: { kind: "tool_exec", toolCallId: toolCall.id, tool: "edit", argsDigest, outcome: "success", messageDigest: "message", artifactId: "committed" } });
+	await c.ledger!.append({ runId: "crash", seq: 19, ts: 0, event: { kind: "tool_intent", toolCallId: toolCall.id, tool: "edit", argsDigest } });
+	await c.ledger!.append({ runId: "crash", seq: 20, ts: 0, event: { kind: "tool_exec", toolCallId: toolCall.id, tool: "edit", argsDigest, outcome: "success", messageDigest: messageDigest("already published"), artifactId: "committed" } });
 	let effects = 0;
 	const dispose = registerLLMBackendFor(x => x === c.llmConfig, { type: "cached-policy", async *streamChat(_config, messages) {
 		expect(messages.find(message => message.role === "tool")?.content).toBe(JSON.stringify({ success: true, message: "already published" }));
 		yield { type: "done" as const };
 	} });
 	try {
-		const events = await collect(createAgentRuntime({ ...c, approval: { preflight: () => ({ action, reason: "Changed policy" }) }, tools: [{ name: "edit", description: "edit", parameters: { type: "object" }, execute: async () => { effects++; return { success: true, message: "duplicate" }; } }] }).resume("crash"));
+		const events = await collect(createAgentRuntime({ ...c, approval: { preflight: () => ({ action, reason: "Changed policy" }) }, tools: [{ name: "edit", description: "edit", parameters: { type: "object" }, execute: async () => { effects++; return { result: { success: true, message: "duplicate" } }; } }] }).resume("crash"));
 		expect(events.at(-1)?.type).toBe("run_completed");
 		expect(effects).toBe(0);
 	} finally { dispose(); }

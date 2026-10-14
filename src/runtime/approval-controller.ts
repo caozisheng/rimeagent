@@ -6,13 +6,14 @@ import type { AgentSessionStore } from "../store/session-store";
 import type { AgentArtifactStore } from "../store/artifact-store";
 import type { RuntimeLedger, LedgerRecord } from "./ledger";
 import type { RuntimeHistory } from "./history";
-import type { ProjectFactsDigest } from "./context-manager";
+import type { HostSnapshot } from "./context-manager";
 import type { ApprovalGate } from "./approval";
 import type { ToolExecutor, ToolExecutorContext } from "./executor";
 import { computeProposalDigest } from "./approval";
 import { computeContextDigest } from "../store/checkpoint";
 import { cloneJson, isJsonValue } from "../store/json";
 import { isId } from "../store/validation";
+import { isExternalStateBinding } from "../store/validation";
 import { rejectRecovery } from "./recovery";
 import { SWITCH_ROLE_TOOL_NAME } from "../service";
 
@@ -26,7 +27,7 @@ export interface RuntimeApprovalOptions {
   history: RuntimeHistory;
   executor: ToolExecutor;
   gate: ApprovalGate;
-  facts?: () => ProjectFactsDigest;
+  getHostSnapshot?: () => HostSnapshot | undefined;
   onPersistenceFailure: () => void;
 }
 export interface ApprovalBatchContext extends ToolExecutorContext {
@@ -61,9 +62,9 @@ export function createRuntimeApproval(options:RuntimeApprovalOptions) {
     if (committed && (execution.runId !== runId || execution.event.tool !== call.function.name || execution.event.argsDigest !== request.argsDigest)) rejectRecovery("Committed approval execution binding changed");
     // Cached results create no new host effect; recovery already verifies their revision chain.
     if (!committed) {
-      const facts = options.facts?.();
-      if (request.projectId !== undefined && request.projectId !== facts?.projectId) rejectRecovery("Approval project identity changed");
-      if (request.projectRevision !== undefined && request.projectRevision !== facts?.projectRevision) rejectRecovery("Approval project revision changed");
+      const binding = options.getHostSnapshot?.()?.externalStateBinding;
+      if (binding !== undefined && !isExternalStateBinding(binding)) rejectRecovery("Invalid approval host binding");
+      if (request.externalStateBinding?.scopeId !== binding?.scopeId || request.externalStateBinding?.version !== binding?.version) rejectRecovery("Approval external state changed");
     }
     if((request.proposalDigest===undefined)!==(request.artifactId===undefined))rejectRecovery("Approval proposal binding is incomplete");
     if(request.artifactId){
@@ -105,15 +106,16 @@ export function createRuntimeApproval(options:RuntimeApprovalOptions) {
           await context.recordLedger({kind:"approval",toolCallId:call.id,decision:decision.action});
           continue;
         }
-        const facts=options.facts?.();
+        const binding=options.getHostSnapshot?.()?.externalStateBinding;
         let artifactId:string|undefined;
         if(decision.proposal!==undefined){
           artifactId=nanoid();
           await persisted(()=>options.artifactStore.put({artifactId:artifactId!,sessionId:options.sessionId,contentType:"application/json",value:cloneJson(decision.proposal!)}));
         }
         context.signal?.throwIfAborted();
+        if (binding !== undefined && !isExternalStateBinding(binding)) rejectRecovery("Invalid approval host binding");
         await options.history.append({kind:"approval_requested",runId:context.runId,toolCallId:call.id,reason:decision.reason,argsDigest:callDigest(call),
-          ...(facts?.projectId===undefined?{}:{projectId:facts.projectId}),...(facts?.projectRevision===undefined?{}:{projectRevision:facts.projectRevision}),
+          ...(binding===undefined?{}:{externalStateBinding:binding}),
           ...(artifactId===undefined?{}:{artifactId,proposalDigest:decision.proposalDigest!})});
         const events:AgentRuntimeEventPayload[]=[];
         if(artifactId){

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentToolResult } from "../../src/tool-types";
 import type { NormalizedError } from "../../src/errors";
-import type { ProjectFactsDigest } from "../../src/runtime/context-manager";
+import type { AuthoritativeContext } from "../../src/runtime/context-manager";
 import {
   isAgentSessionEntry,
   parseAgentSessionEntry,
@@ -11,18 +11,18 @@ import type { AgentSessionEntry } from "../../src/store/entries";
 
 const error: NormalizedError = { category: "tool_failure", message: "nope", retryable: false };
 const result: AgentToolResult = { success: true, message: "ok", data: { nested: [1, "x", null] }, undoable: true };
-const digest: ProjectFactsDigest = { projectId: "project-1", projectRevision: 2, digest: "digest", summary: "summary", producedBy: "host" };
+const digest: AuthoritativeContext = { text: "Current resource", producedBy: "host" };
 
 const entries: AgentSessionEntry[] = [
   { kind: "user_message", id: "e1", ts: 0, content: "hello" },
   { kind: "assistant_message", id: "e2", ts: 1.5, content: "hi", toolCalls: [{ id: "call-1", type: "function", function: { name: "search", arguments: "{}" } }], usage: { promptTokens: 1, cost: 0.25 } },
   { kind: "tool_call", id: "e3", ts: 2, toolCallId: "call-1", name: "search", argsDigest: "args" },
-  { kind: "tool_result", id: "e4", ts: 3, toolCallId: "call-1", result, artifactId: "artifact-1" },
+  { kind: "tool_result", id: "e4", ts: 3, toolCallId: "call-1", result, artifactId: "artifact-1", legacyResult: true },
   { kind: "approval_requested", id: "e5", ts: 4, toolCallId: "call-1", reason: "destructive" },
   { kind: "approval_resolved", id: "e6", ts: 5, toolCallId: "call-1", decision: "allow", by: "policy" },
   { kind: "proposal", id: "e18", ts: 16, toolCallId: "call-1", proposalDigest: "proposal-digest", artifactId: "proposal-artifact" },
-  { kind: "compaction", id: "e7", ts: 6, summary: "summary", compactedEntryIds: ["e1", "e2"], projectDigest: digest },
-  { kind: "checkpoint", id: "e8", ts: 7, checkpointId: "cp-1", projectRevision: 3 },
+  { kind: "compaction", id: "e7", ts: 6, summary: "summary", compactedEntryIds: ["e1", "e2"], authoritativeContext: digest },
+  { kind: "checkpoint", id: "e8", ts: 7, checkpointId: "cp-1" },
   { kind: "branch", id: "e9", ts: 8, fromCheckpointId: "cp-1", branchId: "branch-1" },
   { kind: "run_started", id: "e10", ts: 9, runId: "run-1", parentRunId: "run-0" },
   { kind: "run_interrupted", id: "e11", ts: 10, runId: "run-1", cause: "interrupted", lastDurableBoundary: "cp-1" },
@@ -40,6 +40,14 @@ describe("session entries", () => {
       expect(isAgentSessionEntry(entry)).toBe(true);
       expect(parseAgentSessionEntry(serializeAgentSessionEntry(entry))).toEqual(entry);
     }
+  });
+  test("accepts old undoable results only with the migrated-history marker", () => {
+    const previous = entries[3];
+    expect(previous?.kind).toBe("tool_result");
+    if (previous?.kind !== "tool_result") return;
+    const { legacyResult: _marker, ...newEntry } = previous;
+    expect(isAgentSessionEntry(newEntry)).toBe(false);
+    expect(isAgentSessionEntry(previous)).toBe(true);
   });
 
   test("removes opaque error causes before persistence", () => {

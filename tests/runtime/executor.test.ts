@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ToolCall } from "../../src/types";
-import type { AgentTool } from "../../src/tool-types";
+import type { AgentTool, DurableAgentTool } from "../../src/tool-types";
 import { InMemoryArtifactStore } from "../../src/store/artifact-store";
 import { InMemoryLedger } from "../../src/runtime/ledger";
 import { ApprovalRequiredError, createToolExecutor } from "../../src/runtime/executor";
@@ -9,7 +9,7 @@ import { computeContextDigest } from "../../src/store/checkpoint";
 
 const call = (id = "call-1", args = '{"path":"a"}', name = "edit"): ToolCall => ({ id, type: "function", function: { name, arguments: args } });
 const context = (runId = "run-1", extra: Omit<Partial<ToolExecutorContext>, "runId" | "nextSeq"> = {}) => ({ runId, nextSeq: (() => { let seq = 0; return () => ++seq; })(), ...extra });
-const tool = (execute: AgentTool["execute"], extra: Partial<AgentTool> = {}): AgentTool => ({ name: "edit", description: "edit", parameters: { type: "object" }, execute, ...extra });
+const tool = (execute: AgentTool["execute"], extra: Partial<AgentTool> = {}): DurableAgentTool => ({ name: "edit", description: "edit", parameters: { type: "object" }, ...extra, execute: async args => ({ result: await execute(args) }) });
 const deferred = <T>() => Promise.withResolvers<T>();
 
 describe("ToolExecutor", () => {
@@ -19,7 +19,7 @@ describe("ToolExecutor", () => {
 		const artifactStore = new InMemoryArtifactStore();
 		const executor = createToolExecutor({ sessionId: "session", tools: [tool(async () => { calls++; return { success: true, message: "ok" }; })], ledger, artifactStore });
 		expect(await executor.execute(call(), context())).toMatchObject({ success: true });
-		expect(await executor.execute(call(), context("run-2"))).toMatchObject({ success: true });
+		expect(await executor.execute(call(), context())).toMatchObject({ success: true });
 		expect(calls).toBe(1);
 	});
 
@@ -29,7 +29,7 @@ describe("ToolExecutor", () => {
 		const artifactStore = new InMemoryArtifactStore();
 		const executor = createToolExecutor({ sessionId: "session", tools: [tool(async () => { calls++; return { success: false, message: "no" }; })], ledger, artifactStore });
 		expect(await executor.execute(call(), context())).toMatchObject({ success: false, message: "no" });
-		expect(await executor.execute(call(), context("run-2"))).toMatchObject({ success: false, message: "no" });
+		expect(await executor.execute(call(), context())).toMatchObject({ success: false, message: "no" });
 		expect(calls).toBe(1);
 	});
 
@@ -53,7 +53,7 @@ describe("ToolExecutor", () => {
 		await ledger.append({ runId: "old", seq: 1, ts: 0, event: { kind: "tool_intent", toolCallId: pending.id, tool: "edit", argsDigest: computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [pending] }]) } });
 		let calls = 0;
 		const executor = createToolExecutor({ sessionId: "session", tools: [tool(async () => { calls++; return { success: true, message: "bad" }; }, { annotations: { readOnly: true, requiresApproval: true } })], ledger, artifactStore: new InMemoryArtifactStore() });
-		await expect(executor.execute(pending, context("run-2"))).rejects.toBeInstanceOf(ApprovalRequiredError);
+		await expect(executor.execute(pending, context("run-2"))).rejects.toMatchObject({ category: "tool_failure" });
 		expect(calls).toBe(0);
 	});
 	test("runs adjacent parallel reads together, preserves result order, and keeps writes isolated", async () => {
@@ -76,28 +76,20 @@ describe("ToolExecutor", () => {
 		expect(events).toEqual(["write-start", "write-end", "read-a-start", "read-b-start", "write-start", "write-end"]);
 	});
 
-	test("treats undo as an exclusive barrier even when its annotations permit parallel reads", async () => {
+	test("schedules undo by its annotations, not its name", async () => {
 		const before = deferred<{ success: boolean; message: string }>();
 		const undo = deferred<{ success: boolean; message: string }>();
-		const afterStarted = deferred<void>();
 		const beforeStarted = deferred<void>();
 		const undoStarted = deferred<void>();
 		const executor = createToolExecutor({ sessionId: "session", executor: { parallelReadOnly: true }, ledger: new InMemoryLedger(), artifactStore: new InMemoryArtifactStore(), tools: [
 			tool(async () => { beforeStarted.resolve(); return before.promise; }, { name: "read-before", annotations: { readOnly: true, executionMode: "parallel" } }),
 			tool(async () => { undoStarted.resolve(); return undo.promise; }, { name: "undo", annotations: { readOnly: true, executionMode: "parallel" } }),
-			tool(async () => { afterStarted.resolve(); return { success: true, message: "after" }; }, { name: "read-after", annotations: { readOnly: true, executionMode: "parallel" } }),
 		] });
-		const batch = executor.executeBatch([call("before", "{}", "read-before"), call("undo", "{}", "undo"), call("after", "{}", "read-after")], context());
-		await beforeStarted.promise;
-		before.resolve({ success: true, message: "before" });
-		await undoStarted.promise;
-		let afterRan = false;
-		afterStarted.promise.then(() => { afterRan = true; });
-		await Promise.resolve();
-		expect(afterRan).toBe(false);
+		const batch = executor.executeBatch([call("before", "{}", "read-before"), call("undo", "{}", "undo")], context());
+		await Promise.all([beforeStarted.promise, undoStarted.promise]);
 		undo.resolve({ success: true, message: "undone" });
-		await afterStarted.promise;
-		expect((await batch).map(result => result.message)).toEqual(["before", "undone", "after"]);
+		before.resolve({ success: true, message: "before" });
+		expect((await batch).map(result => result.message)).toEqual(["before", "undone"]);
 	});
 
 	test("settles every parallel read when one provider read fails and propagates storage faults", async () => {
@@ -124,14 +116,14 @@ describe("ToolExecutor", () => {
 		const ledger = new InMemoryLedger();
 		const executor = createToolExecutor({ sessionId: "session", ledger, artifactStore: new InMemoryArtifactStore(), approval: { async preflight(input) {
 			calls.push(input.toolCall);
-			expect(input).toMatchObject({ runId: "run-1", projectId: "project", projectRevision: 4, annotations: { requiresApproval: true } });
+			expect(input).toMatchObject({ runId: "run-1", externalStateBinding: { scopeId: "project", version: "4" }, annotations: { requiresApproval: true } });
 			return { action: "suspend", reason: "review" };
 		} }, tools: [tool(async () => { effects++; return { success: true, message: "unsafe" }; }, { annotations: { requiresApproval: true } })] });
 		const pending = call("needs-review");
-		await expect(executor.executeBatch([pending], context("run-1", { projectFacts: () => ({ projectId: "project", projectRevision: 4, digest: "facts", producedBy: "host" }) }))).rejects.toBeInstanceOf(ApprovalRequiredError);
+		await expect(executor.executeBatch([pending], context("run-1", { getHostSnapshot: () => ({ externalStateBinding: { scopeId: "project", version: "4" } }) }))).rejects.toBeInstanceOf(ApprovalRequiredError);
 		expect(effects).toBe(0);
 		expect((await ledger.query("run-1")).some(record => record.event.kind === "tool_intent")).toBe(false);
-		await expect(executor.execute(pending, context("run-1", { projectFacts: () => ({ projectId: "project", projectRevision: 4, digest: "facts", producedBy: "host" }) }))).rejects.toBeInstanceOf(ApprovalRequiredError);
+		await expect(executor.execute(pending, context("run-1", { getHostSnapshot: () => ({ externalStateBinding: { scopeId: "project", version: "4" } }) }))).rejects.toBeInstanceOf(ApprovalRequiredError);
 		expect(calls).toHaveLength(2);
 	});
 	test("returns only the completed serial prefix after cancellation", async () => {

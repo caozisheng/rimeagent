@@ -56,7 +56,8 @@ export class IndexedDBLedger {
             if (!key)
                 return null;
             const value = await request(transaction.objectStore("ledger").get(key));
-            if (!isLedgerRecord(value))
+            if (!isLedgerRecord(value) || value.runId !== key[0] || value.seq !== key[1]
+                || (value.event.kind !== "tool_exec" && value.event.kind !== "tool_intent") || value.event.toolCallId !== toolCallId)
                 throw new TypeError("Invalid persisted execution record");
             return cloneJson(value);
         });

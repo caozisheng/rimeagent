@@ -9,12 +9,12 @@ const ENTRY_KEYS = {
     user_message: ["kind", "id", "ts", "content"],
     assistant_message: ["kind", "id", "ts", "content", "toolCalls", "usage"],
     tool_call: ["kind", "id", "ts", "toolCallId", "name", "argsDigest"],
-    tool_result: ["kind", "id", "ts", "toolCallId", "result", "artifactId"],
-    approval_requested: ["kind", "id", "ts", "toolCallId", "reason", "runId", "argsDigest", "projectId", "projectRevision", "proposalDigest", "artifactId"],
+    tool_result: ["kind", "id", "ts", "toolCallId", "result", "artifactId", "legacyResult"],
+    approval_requested: ["kind", "id", "ts", "toolCallId", "reason", "runId", "argsDigest", "externalStateBinding", "proposalDigest", "artifactId"],
     approval_resolved: ["kind", "id", "ts", "toolCallId", "decision", "by", "runId", "note", "proposalDigest"],
     proposal: ["kind", "id", "ts", "toolCallId", "proposalDigest", "artifactId"],
-    compaction: ["kind", "id", "ts", "summary", "compactedEntryIds", "projectDigest"],
-    checkpoint: ["kind", "id", "ts", "checkpointId", "projectRevision"],
+    compaction: ["kind", "id", "ts", "summary", "compactedEntryIds", "authoritativeContext"],
+    checkpoint: ["kind", "id", "ts", "checkpointId"],
     branch: ["kind", "id", "ts", "fromCheckpointId", "branchId"],
     run_started: ["kind", "id", "ts", "runId", "parentRunId"],
     run_interrupted: ["kind", "id", "ts", "runId", "cause", "lastDurableBoundary"],
@@ -158,18 +158,22 @@ export function isNormalizedError(value) {
         return false;
     }
 }
-export function isProjectFacts(value) {
-    try {
-        return isRecord(value) && hasOnlyKeys(value, ["projectId", "projectRevision", "digest", "summary", "producedBy"])
-            && required(value, "projectRevision", isCount)
-            && required(value, "digest", item => typeof item === "string")
-            && required(value, "producedBy", item => item === "host")
-            && optional(value, "projectId", isId)
-            && optional(value, "summary", item => typeof item === "string");
-    }
-    catch {
+export function isExternalStateBinding(value) {
+    return isRecord(value) && hasOnlyKeys(value, ["scopeId", "version"])
+        && required(value, "scopeId", isId) && required(value, "version", isId);
+}
+export function isAuthoritativeContext(value) {
+    return isRecord(value) && hasOnlyKeys(value, ["text", "producedBy"])
+        && required(value, "text", item => typeof item === "string") && required(value, "producedBy", item => item === "host");
+}
+export function isExecutionReceipt(value) {
+    if (!isRecord(value) || !hasOnlyKeys(value, ["operationId", "stateChange"]))
         return false;
-    }
+    if (!optional(value, "operationId", isId) || !optional(value, "stateChange", change => isRecord(change)
+        && hasOnlyKeys(change, ["before", "after"]) && required(change, "before", isExternalStateBinding)
+        && required(change, "after", isExternalStateBinding)))
+        return false;
+    return true;
 }
 export function isAgentSessionEntry(value) {
     try {
@@ -182,14 +186,16 @@ export function isAgentSessionEntry(value) {
             case "user_message": return required(value, "content", item => typeof item === "string");
             case "assistant_message": return required(value, "content", item => typeof item === "string") && optional(value, "toolCalls", isToolCalls) && optional(value, "usage", isTokenUsage);
             case "tool_call": return required(value, "toolCallId", isId) && required(value, "name", isId) && required(value, "argsDigest", isId);
-            case "tool_result": return required(value, "toolCallId", isId) && required(value, "result", isToolResult) && optional(value, "artifactId", isId);
+            case "tool_result": return required(value, "toolCallId", isId) && required(value, "result", isToolResult) && optional(value, "artifactId", isId)
+                && optional(value, "legacyResult", item => item === true)
+                && (!isRecord(value.result) || !Object.hasOwn(value.result, "undoable") || value.legacyResult === true);
             case "approval_requested": return required(value, "toolCallId", isId) && required(value, "reason", item => typeof item === "string")
-                && ["runId", "argsDigest", "projectId", "proposalDigest", "artifactId"].every(key => optional(value, key, isId)) && optional(value, "projectRevision", isCount);
+                && ["runId", "argsDigest", "proposalDigest", "artifactId"].every(key => optional(value, key, isId)) && optional(value, "externalStateBinding", isExternalStateBinding);
             case "approval_resolved": return required(value, "toolCallId", isId) && required(value, "decision", item => item === "allow" || item === "deny") && required(value, "by", item => item === "user" || item === "policy")
                 && optional(value, "runId", isId) && optional(value, "note", item => typeof item === "string") && optional(value, "proposalDigest", isId);
             case "proposal": return required(value, "toolCallId", isId) && required(value, "proposalDigest", isId) && required(value, "artifactId", isId);
-            case "compaction": return required(value, "summary", item => typeof item === "string") && required(value, "compactedEntryIds", item => isArrayOf(item, isId)) && required(value, "projectDigest", isProjectFacts);
-            case "checkpoint": return required(value, "checkpointId", isId) && optional(value, "projectRevision", isCount);
+            case "compaction": return required(value, "summary", item => typeof item === "string") && required(value, "compactedEntryIds", item => isArrayOf(item, isId)) && optional(value, "authoritativeContext", isAuthoritativeContext);
+            case "checkpoint": return required(value, "checkpointId", isId);
             case "branch": return required(value, "fromCheckpointId", isId) && required(value, "branchId", isId);
             case "run_started": return required(value, "runId", isId) && optional(value, "parentRunId", isId);
             case "run_interrupted": return required(value, "runId", isId) && required(value, "cause", isCategory) && optional(value, "lastDurableBoundary", isId);

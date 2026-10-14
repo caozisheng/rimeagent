@@ -2,7 +2,7 @@ import type { AgentMessage } from "../types";
 import type { AgentSessionEntry } from "../store/entries";
 import type { AgentSessionStore } from "../store/session-store";
 import type { AgentCheckpoint, AgentCheckpointRef } from "../store/checkpoint";
-import type { ProjectFactsDigest } from "./context-manager";
+import type { ExternalStateBinding } from "../tool-types";
 type EntryBody = AgentSessionEntry extends infer E ? E extends AgentSessionEntry ? Omit<E, "id" | "ts"> : never : never;
 export declare function projectMessages(entries: readonly AgentSessionEntry[]): AgentMessage[];
 /** New runs require a complete protocol; resume repairs the final pending batch. */
@@ -10,7 +10,7 @@ export declare function assertCompleteHistory(messages: readonly AgentMessage[])
 export interface HistoryBoundary {
     runId: string;
     seq: number;
-    projectFacts?: ProjectFactsDigest;
+    externalStateBinding?: ExternalStateBinding;
 }
 /** Appends confirmed messages only; lifecycle/checkpoints never enter the model projection. */
 export declare class RuntimeHistory {

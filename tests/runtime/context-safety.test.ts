@@ -25,7 +25,7 @@ for(const changed of ["revision","identity"] as const)test(`project ${changed} c
     yield{type:"done",usage:{totalTokens:3}};
   }});
   try{
-    const events=await collect(createAgentRuntime({sessionId:llmConfig.model,sessionStore:store,ledger,llmConfig,expertRoleId:"general",tools:[{name:"edit",description:"edit",parameters:{type:"object",properties:{}},execute:async()=>{edits++;return{success:true,message:"edited wrong project"};}}],hooks:{getProjectFacts:()=>({projectId,projectRevision:revision,digest:"facts",producedBy:"host"})}}).run("edit original project"));
+    const events=await collect(createAgentRuntime({sessionId:llmConfig.model,sessionStore:store,ledger,llmConfig,expertRoleId:"general",tools:[{name:"edit",description:"edit",parameters:{type:"object",properties:{}},execute:async()=>{edits++;return{result:{success:true,message:"edited wrong project"}};}}],hooks:{getHostSnapshot:()=>({externalStateBinding:{scopeId:projectId,version:String(revision)},authoritativeContext:{text:"facts",producedBy:"host"}})}}).run("edit original project"));
     expect(edits).toBe(0);
     expect(events.at(-1)!.type).toBe("run_failed");
     expect(events.at(-1)!.payload).toMatchObject({error:{category:"tool_failure"}});
@@ -50,7 +50,7 @@ test("final-attempt projection storage faults reject the original error rather t
     yield{type:"done"};
   }});
   try{
-    const runtime=createAgentRuntime({sessionId:"final-store",...persistence,llmConfig,expertRoleId:"general",tools:[{name:"edit",description:"edit",parameters:{type:"object",properties:{}},execute:async()=>({success:true,message:"committed",data:{payload:"full result"}})}]});
+    const runtime=createAgentRuntime({sessionId:"final-store",...persistence,llmConfig,expertRoleId:"general",tools:[{name:"edit",description:"edit",parameters:{type:"object",properties:{}},execute:async()=>({result:{success:true,message:"committed",data:{payload:"full result"}}})}]});
     await collect(runtime.run("complete prior edit"));
     await expect(collect(runtime.run("trigger overflow"))).rejects.toBe(failure);
     expect(requests).toBe(5);

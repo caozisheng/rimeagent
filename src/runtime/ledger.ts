@@ -1,7 +1,8 @@
 import type { AgentErrorCategory } from "../errors";
 import type { TokenUsage } from "../types";
+import type { ExecutionReceipt } from "../tool-types";
 import { cloneJson } from "../store/json";
-import { hasOnlyKeys, isCount, isId, isRecord, isTokenUsage } from "../store/validation";
+import { hasOnlyKeys, isCount, isExecutionReceipt, isId, isRecord, isTokenUsage } from "../store/validation";
 
 export type ApprovalDecision = "allow" | "deny" | "suspend";
 
@@ -25,9 +26,7 @@ export interface LedgerRecord {
 			outcome: "success" | "failure";
 			messageDigest: string;
 			artifactId?: string;
-			commandId?: string;
-			projectRevisionBefore?: number;
-			projectRevisionAfter?: number;
+			receipt?: ExecutionReceipt;
 		}
 		| { kind: "retry"; toolCallId?: string; attempt: number; category: AgentErrorCategory }
 		| { kind: "approval"; toolCallId: string; decision: ApprovalDecision }
@@ -49,7 +48,7 @@ const eventKeys: Record<string, readonly string[]> = {
 	tool_intent: ["kind", "toolCallId", "tool", "argsDigest"],
 	tool_exec: [
 		"kind", "toolCallId", "tool", "argsDigest", "outcome", "messageDigest",
-		"artifactId", "commandId", "projectRevisionBefore", "projectRevisionAfter",
+		"artifactId", "receipt",
 	],
 	retry: ["kind", "toolCallId", "attempt", "category"],
 	approval: ["kind", "toolCallId", "decision"],
@@ -87,8 +86,8 @@ export function isLedgerRecord(value: unknown): value is LedgerRecord {
 			return ["toolCallId", "tool", "argsDigest", "outcome", "messageDigest"].every(key => Object.hasOwn(event, key))
 				&& isId(event.toolCallId) && isId(event.tool) && isId(event.argsDigest)
 				&& isId(event.messageDigest) && (event.outcome === "success" || event.outcome === "failure")
-				&& ["artifactId", "commandId"].every(key => event[key] === undefined || isId(event[key]))
-				&& ["projectRevisionBefore", "projectRevisionAfter"].every(key => event[key] === undefined || isCount(event[key]));
+				&& (event.artifactId === undefined || isId(event.artifactId))
+				&& (event.receipt === undefined || isExecutionReceipt(event.receipt));
 		case "retry":
 			return ["attempt", "category"].every(key => Object.hasOwn(event, key))
 				&& (event.toolCallId === undefined || isId(event.toolCallId)) && isCount(event.attempt)

@@ -1,7 +1,8 @@
 import type { AgentErrorCategory, NormalizedError } from "../errors";
 import type { AgentToolResult } from "../tool-types";
+import type { ExternalStateBinding } from "../tool-types";
 import type { TokenUsage, ToolCall } from "../types";
-import type { ProjectFactsDigest } from "../runtime/context-manager";
+import type { AuthoritativeContext } from "../runtime/context-manager";
 import { cloneJson } from "./json";
 import { isAgentSessionEntry } from "./validation";
 export { isAgentSessionEntry };
@@ -10,12 +11,12 @@ export type AgentSessionEntry =
 	| { kind: "user_message"; id: string; ts: number; content: string }
 	| { kind: "assistant_message"; id: string; ts: number; content: string; toolCalls?: ToolCall[]; usage?: TokenUsage }
 	| { kind: "tool_call"; id: string; ts: number; toolCallId: string; name: string; argsDigest: string }
-	| { kind: "tool_result"; id: string; ts: number; toolCallId: string; result: AgentToolResult; artifactId?: string }
-	| { kind: "approval_requested"; id: string; ts: number; toolCallId: string; reason: string; runId?: string; argsDigest?: string; projectId?: string; projectRevision?: number; proposalDigest?: string; artifactId?: string }
+	| { kind: "tool_result"; id: string; ts: number; toolCallId: string; result: AgentToolResult; artifactId?: string; legacyResult?: true } // migrated result JSON stays intact for checkpoint digests
+	| { kind: "approval_requested"; id: string; ts: number; toolCallId: string; reason: string; runId?: string; argsDigest?: string; externalStateBinding?: ExternalStateBinding; proposalDigest?: string; artifactId?: string }
 	| { kind: "approval_resolved"; id: string; ts: number; toolCallId: string; decision: "allow" | "deny"; by: "user" | "policy"; runId?: string; note?: string; proposalDigest?: string }
 	| { kind: "proposal"; id: string; ts: number; toolCallId: string; proposalDigest: string; artifactId: string }
-	| { kind: "compaction"; id: string; ts: number; summary: string; compactedEntryIds: string[]; projectDigest: ProjectFactsDigest }
-	| { kind: "checkpoint"; id: string; ts: number; checkpointId: string; projectRevision?: number }
+	| { kind: "compaction"; id: string; ts: number; summary: string; compactedEntryIds: string[]; authoritativeContext?: AuthoritativeContext }
+	| { kind: "checkpoint"; id: string; ts: number; checkpointId: string }
 	| { kind: "branch"; id: string; ts: number; fromCheckpointId: string; branchId: string }
 	| { kind: "run_started"; id: string; ts: number; runId: string; parentRunId?: string }
 	| { kind: "run_interrupted"; id: string; ts: number; runId: string; cause: AgentErrorCategory; lastDurableBoundary?: string }

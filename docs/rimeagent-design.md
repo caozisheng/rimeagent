@@ -1,8 +1,8 @@
 # rimeagent 设计式样：长程能力（Durable Agent Runtime）实施计划
 
-> **Status**: Accepted — 2026-10-08 · Rev3 2026-10-11（排期重排：VercelAIBackend 前置 Phase 1；runner 顺延 Phase 2–6；NativeLLMBackend 移出排期转附录 C）
+> **Status**: Accepted — 2026-10-08 · Rev3 2026-10-11（排期重排：VercelAIBackend 前置 Phase 1；runner 顺延 Phase 2–6；NativeLLMBackend 移出排期转附录 C）· Rev4 2026-10-13（P6 插入领域中立化与 RimeCut 双仓迁移；P7/P8 后置于该增量验收）
 > **基线**: rimeagent `v0.1.0` @ `f30d9cb`（17 文件 / 1,398 行，源码核对）
-> **实施进度（2026-10-12）**：Phase 0/1 已提交 `394ee50` 并合入远端；Phase 2/3 提交 `e78e684`；Phase 4/5 提交 `1348e01`；Phase 6 引擎侧交付已实施，包版本 `0.8.0`（未发布、未打 tag）。`bun test` 450 项通过，typecheck / 完整 build / core-only build 通过，dist 已生成。实际 HTTP/SSE + Chromium IndexedDB 验证审批 proposal→等待→刷新→持久化决策→同 run/call 恢复，副作用一次；读并发峰值2、结果顺序稳定、写/undo/redo/restore revision 连续且不重叠。独立审查发现的批次旧 revision、已提交审批重放、deny checkpoint 崩溃、并发决策、策略改变覆盖缓存、preflight 存储错误均有 failing-before/passing-after 回归；编译产物冒烟验证缓存结果在 deny/suspend 新策略下仍重放且零新副作用，adapter 错误保持原异常。Phase 7/8 尚未实施；NativeLLMBackend 明确不做。宿主SQLite/file、38工具标注迁移与真实编辑任务仍由宿主仓验收，未更改pin或代签验收。
+> **实施进度（2026-10-14）**：Phase 0–5 与 Phase 6 的 6.1–6.5 基线已提交至 `f9d4aae`；6.6–6.10 领域中立内核、执行回执与 schema 2 迁移已在 `0.9.0` 工作树实现，`bun test` 456 项（1,853 断言）、typecheck、完整 build 与 core-only build 通过，dist 已重建。RimeCut Web adapter 已接入一致 `HostSnapshot`、真实 HeadlessSession 回执、工具专属 command provenance、宿主 UI 元数据与可等待插件写入；聚焦 37 项回归、Biome、Web build 和实际浏览器编辑器/IndexedDB v2 surface 通过。6.11 的可到达 Git pin/lock 切换、Tauri 实机、真实 BYOK 审批刷新链与完整跨平台 UI 自动化尚未完成，不能宣称生产切流或 Phase 6 联合出口全部通过。Phase 7/8 与 NativeLLMBackend 仍未实施。
 > **上游决策**:
 > - `rimecut-public/docs/rimecut-feature-dev-rimeagent-design.md` §12（Durable Agent Runtime 决策版，2026-10-08）
 > - `rimecut-public/docs/rimecut-cli-for-agent.md` v3（§D5/D6：内置 agent 快路径、harness 方法、parity 已验收项）
@@ -20,7 +20,7 @@
 4. 目标架构
 5. 核心契约
 6. 关键设计决策
-7. 实施计划（Phase 0–7）
+7. 实施计划（Phase 0–8；P6 增量已实现内核/Web adapter，联合发布验收仍待完成，§7.7.2–7.7.3）
 8. 验收与质量门禁
 9. 风险与缓解
 10. 与上游文档的可追溯映射
@@ -181,7 +181,8 @@ src/
 | 0.5.0 | 3 | `createAgentRuntime()` 主入口；`runAgentLoop`/`runAgentSession` 变薄包装 |
 | 0.6.0 | 4 | store 落盘 + ledger + interrupted-run resume（含 `./adapters/web`） |
 | 0.7.0 | 5 | ContextManager + compaction + overflow recovery |
-| 0.8.0 | 6 | ToolExecutor 策略 + ApprovalGate |
+| 0.8.0 | 6 基线 | ToolExecutor 策略 + ApprovalGate |
+| 0.9.0 | 6 增量 | 领域中立快照、执行回执、schema 2 与旧 IndexedDB 事务迁移（验收以双仓验证为准） |
 | 1.0.0 | 7+8 | CLI/MCP/parity + 评测；契约冻结承诺（semver 语义化开始） |
 
 RimeCut 宿主每个 Phase 结束 pin 新 commit 切换一次（上游 §12.9 阶段验收即切换点）；pin 纪律与引擎仓 `dist/` release 要求见附录 D。
@@ -203,8 +204,8 @@ export type AgentSessionEntry =
   | { kind: "tool_result";         id: string; ts: number; toolCallId: string; result: AgentToolResult; artifactId?: string }
   | { kind: "approval_requested";  id: string; ts: number; toolCallId: string; reason: string }
   | { kind: "approval_resolved";   id: string; ts: number; toolCallId: string; decision: "allow" | "deny"; by: "user" | "policy" }
-  | { kind: "compaction";          id: string; ts: number; summary: string; compactedEntryIds: string[]; projectDigest: ProjectFactsDigest }
-  | { kind: "checkpoint";          id: string; ts: number; checkpointId: string; projectRevision?: number }
+  | { kind: "compaction";          id: string; ts: number; summary: string; compactedEntryIds: string[]; authoritativeContext?: AuthoritativeContext }
+  | { kind: "checkpoint";          id: string; ts: number; checkpointId: string }
   | { kind: "branch";              id: string; ts: number; fromCheckpointId: string; branchId: string }
   | { kind: "run_started";         id: string; ts: number; runId: string; parentRunId?: string }
   | { kind: "run_interrupted";     id: string; ts: number; runId: string; cause: AgentErrorCategory; lastDurableBoundary?: string }
@@ -241,9 +242,7 @@ export interface AgentCheckpoint {
 export interface AgentCheckpointRef {
   readonly checkpointId: string;
   readonly sessionId: string;
-  readonly projectId?: string;
-  readonly projectRevision?: number;      // 恢复前必须校验（不变量 3）
-  readonly projectCheckpointId?: string;  // 宿主 project.checkpoint 的 ID（CLI 文档 §8.2）
+  readonly externalStateBinding?: ExternalStateBinding; // scopeId + opaque version
   readonly contextDigest: string;
 }
 ```
@@ -252,9 +251,9 @@ export interface AgentCheckpointRef {
 
 1. Agent branch **不得自动回滚** ProjectDocument；
 2. 项目回滚只能通过明确的 `project.restore` 领域操作（宿主工具）；
-3. 恢复 Agent run 前必须验证项目 revision 匹配 `AgentCheckpointRef.projectRevision`；
-4. stale revision 不得静默覆盖——mismatch 返回结构化错误，由用户/宿主决策；
-5. 每次写工具都记录 project revision before/after 和 commandId（ledger，§5.8）；
+3. 恢复 run 前校验 checkpoint 绑定与宿主当前状态；只接受经有序、连续且已提交的回执链推进；
+4. stale version 不得静默覆盖或重设 checkpoint；
+5. 工具副作用的操作 ID/状态变化由宿主真实提交结果生成 receipt，单独入 ledger；
 6. context compaction 不得把摘要当成 ProjectDocument 的事实来源（§5.7）。
 
 ### 5.3 事件 v2（对 G6 部分）
@@ -300,7 +299,7 @@ export interface AgentRuntimeConfig {
   readonly sessionStore: AgentSessionStore;
   readonly artifactStore: AgentArtifactStore;
   readonly context: ContextManagerConfig;          // §5.7
-  readonly tools: readonly AgentTool[];            // 带 annotations
+  readonly tools: readonly DurableAgentTool[];     // 单次执行返回 { result, receipt? }
   readonly executor?: ToolExecutorConfig;          // §5.5，缺省全串行
   readonly approval?: ApprovalGate;                // §5.6，缺省 auto-allow 只读
   readonly maxIterations?: number;                 // 缺省 10；orchestrator 20 由宿主传
@@ -313,7 +312,7 @@ export interface AgentRuntimeConfig {
     readonly buildRagContext?: RagBuilder;                   // 迁移自 runAgentLoop 参数（§5.7）
     readonly buildErrorRecovery?: ErrorRecoveryBuilder;
     readonly onRoleSwitch?: (roleId: string) => AgentLLMConfig | void;
-    readonly getProjectFacts?: () => ProjectFactsDigest;     // compaction 反事实注入源
+    readonly getHostSnapshot?: () => HostSnapshot | undefined;
   };
 }
 
@@ -386,8 +385,7 @@ export interface ToolCallContext {
   readonly runId: string;
   readonly toolCall: ToolCall;
   readonly annotations?: AgentToolAnnotations;
-  readonly projectId?: string;
-  readonly projectRevision?: number;
+  readonly externalStateBinding?: ExternalStateBinding;
 }
 ```
 
@@ -409,12 +407,11 @@ export interface ContextManagerConfig {
   readonly maxToolResultTokens?: number;           // 缺省 2048，超出 → artifact + 摘要行
 }
 
-export interface ProjectFactsDigest {
-  readonly projectId?: string;
-  readonly projectRevision: number;
-  readonly digest: string;             // 宿主实时构建（canonical JSON hash / timeline 摘要）
-  readonly summary?: string;           // 可选人类可读行
-  readonly producedBy: "host";         // 类型级强制：摘要不得伪装宿主事实
+export interface AuthoritativeContext { readonly text: string; readonly producedBy: "host" }
+export interface ExternalStateBinding { readonly scopeId: string; readonly version: string }
+export interface HostSnapshot {
+  readonly authoritativeContext?: AuthoritativeContext;
+  readonly externalStateBinding?: ExternalStateBinding;
 }
 
 export interface ContextProjection {
@@ -431,11 +428,11 @@ entries → tokenize 计量
   → 保留最近完整 tool turns（assistant toolCalls + 对应 tool results 原子性保留）
   → 超过 compactTriggerRatio × (contextTokens − reserveOutputTokens)：
        选择安全 cut point（最后一个已完成任务边界 / checkpoint entry）
-       旧 entries → 宿主 summarize hook 生成摘要（含：用户目标、约束、已完成编辑、
-         关键决策、失败工具、未解决问题、下一步、重要媒体/时间线引用）
-       落盘 compaction entry（摘要 + compactedEntryIds + projectDigest）
+       旧 entries → 宿主 summarize hook 生成通用摘要（含用户目标、约束、已完成工作、
+         关键决策、失败工具、未解决问题、下一步、引用）
+       落盘 compaction entry（摘要 + compactedEntryIds + 可选 authoritativeContext）
   → 大 tool result（> maxToolResultTokens）→ artifact store，投影只留摘要行 + artifactId
-  → 头部注入最新 getProjectFacts() digest（P30 之前的独立 context 行）
+  → 头部注入同一 getHostSnapshot() 的可选最新权威文本，不注入版本绑定
   → 输出 ContextProjection
 ```
 
@@ -453,7 +450,7 @@ export interface LedgerRecord {
     | { kind: "model_call"; provider: string; model: string; requestIndex: number; usage: TokenUsage }
     | { kind: "tool_exec"; toolCallId: string; tool: string; argsDigest: string;
         outcome: "success" | "failure"; messageDigest: string; artifactId?: string;
-        commandId?: string; projectRevisionBefore?: number; projectRevisionAfter?: number }
+        receipt?: ExecutionReceipt }
     | { kind: "retry"; toolCallId?: string; attempt: number; category: AgentErrorCategory }
     | { kind: "approval"; toolCallId: string; decision: string }
     | { kind: "compaction" | "cancellation"; detail?: string };
@@ -466,7 +463,7 @@ export interface RuntimeLedger {
 }
 ```
 
-红线：ledger 不存媒体字节、API key、cookie、完整敏感 prompt；大结果走 `AgentArtifactStore`（put/get/list，value 为 JSON-able 数据 + contentType；媒体文件本就不进 agent 层）。`commandId` / revision before/after 字段与 CLI serve 的 `project.log` / `project.diff`（CLI 文档 §8.2）按 key 对齐，供 rimecut 仓做命令流 parity 断言（§7 Phase 6）。
+红线：ledger 不存媒体字节、API key、cookie、完整敏感 prompt；业务 result.data 的任意字段都不作为回执。`ExecutionReceipt` 单独携带宿主已提交 operationId 与可选 before/after 状态变更，结果 artifact 不包含回执；旧库完整备份与转换只从旧 ledger 元数据生成回执，绝不猜测工具结果。
 
 ### 5.9 错误归一（对 G4）
 
@@ -786,7 +783,9 @@ Phase 5 实施冻结补充（2026-10-12）：
 - Phase 5 审查修正：最终 token 门禁针对实际 prepared messages（含合并后的 system 层）与过滤后的 tool schemas；投影估算不替代最终门禁。每次 preparation exception 在归一化之前检查持久化故障，包含最后尝试，原异常不得变成 provider overflow 中断。模型 streaming/异步上下文构建期间宿主项目变更必须在 confirmed assistant 与 provider/tool 边界再次验证旧 project binding，不得先重新 checkpoint 接纳新 revision 再执行旧计划；已完成模型请求的实际用量先记账，不因计划被拒而消失。
 
 
-### 7.7 Phase 6：审批与执行策略（2.5 周 → v0.8.0）
+### 7.7 Phase 6：审批、执行策略与领域中立化（0.9.0 工作树已实现；联合发布验收未完成）
+
+#### 7.7.1 已实施基线：审批与执行策略（6.1–6.5，v0.8.0）
 
 | 任务 | 文件 | 要点 | 验收 |
 |---|---|---|---|
@@ -796,7 +795,7 @@ Phase 5 实施冻结补充（2026-10-12）：
 | 6.4 proposal 事件 | `src/events.ts` | 批量编辑生成 proposal 的宿主协议（proposal = 带 diff 预览的 approval 变体，payload 增 `proposalDigest`） | 事件 schema 测试 |
 | 6.5 宿主标注迁移指引 | `docs/rimeagent-design.md` | RimeCut 38 工具的标注表（§5.5）由 rimecut 仓落地；本仓提供 contract test 校验标注完整性 | 每个注册工具 annotations 齐全（宿主侧门禁） |
 
-**Phase 6 出口**：删除/生成/export 审批；revision 和 undo chain 正确。
+**Phase 6 的 0.8.0 基线出口**：删除/生成/export 审批；revision 和 undo chain 正确。当前新增出口见 §7.7.2。
 
 Phase 6 实施冻结补充（2026-10-12）：
 
@@ -809,8 +808,144 @@ Phase 6 实施冻结补充（2026-10-12）：
 
 - `tests/contract/tool-annotation-contract.ts` 的 `assertToolAnnotationContract(tools)` 检查最终宿主 registry 的五个显式字段、唯一名称、禁止并行写和矛盾 read/destructive。RimeCut 38 工具真实标注、EditorCore undo chain 与三宿主验收仍归宿主仓；本仓不改宿主 pin，不代签。npm `./contract` 发布留在 Phase 7。
 - 实际 HTTP/SSE + Chromium IndexedDB 验证 proposal → 等待 → 刷新 → 重开三件套 → resolve → 同 run 完成，副作用一次、revision 4→5；交错读完成顺序逆转但结果仍按模型顺序，写/undo/redo/restore 命令 revision 连续 4→9，读并发峰值2且无写重叠。NativeLLMBackend 明确排除。
-- Phase 6 最终门禁：450 tests / typecheck / full build / core-only build 全通过；两路独立审查的重要问题已修复。dist smoke 覆盖 autoallow 已提交调用的 deny/suspend 策略变化与 replay-index 原异常传播，新增副作用均为0。
+- Phase 6 的 0.8.0 基线验证门禁：450 tests / typecheck / full build / core-only build 全通过；两路独立审查的重要问题已修复。dist smoke 覆盖 autoallow 已提交调用的 deny/suspend 策略变化与 replay-index 原异常传播，新增副作用均为0。
 
+
+
+#### 7.7.2 当前增量状态：领域中立化（6.6–6.10 已实现；6.11–6.12 未完成）
+
+**顺序**：`0.8.0` 的 6.1–6.5 基线已经交付；`0.9.0` 工作树已实现 6.6–6.10 的中立契约、调度、快照/绑定、回执与迁移。必须完成固定 Git commit/pin/lock、Tauri 实机与真实审批刷新联合验收，才可进入 Phase 7 或切生产流量。
+
+| 任务 | rimeagent 交付 | RimeCut 配套 | 验收/依赖 |
+|---|---|---|---|
+| 6.6 冻结中立契约与迁移 fixture | 类型、schema 版本、错误语义、旧数据样本映射 | 核对宿主快照、真实命令回执、插件和 UI 消费面 | ✅ 已实现并由类型/fixture 验证 |
+| 6.7 工具上下文与调度去领域化 | 移出 editor/element/track/单位转换类型；删除 undo/redo/restore 名称分支 | 自有 ToolContext 与完整 annotations；保留领域编辑逻辑 | ✅ 引擎按 annotations；宿主自有 ToolContext |
+| 6.8 事实与状态绑定分离 | HostSnapshot、权威上下文、不透明 scope/version；无项目 compaction | HeadlessSession 一致快照映射；项目命令保留 expectedRevision | ✅ 内核/adapter/ETag 与 Web surface 已验证 |
+| 6.9 结果与执行回执分离 | 新 durable result/receipt 边界；ledger 状态链及缓存重放 | 从已提交 ProjectCommand 结果产生回执；UI/undo 元数据归宿主 | ✅ namespace、provenance、stale binding 回归通过 |
+| 6.10 持久化 schema 迁移 | 转换器、索引/引用/digest 校验、故障与重开契约 | 暂停旧库写入、备份、事务迁移、人工处理不可验证任务 | ✅ 引擎迁移/回滚 fixture 与 Chromium schema 2 打开通过 |
+| 6.11 双仓切换 | 含 dist 的固定 Git commit 与契约 fixture | Web/Tauri 同 pin，更新 Bun lockfile；共享 adapter/审批与 UI 类型 | ⏳ 工作树集成通过；可到达 commit 与 pin/lock 尚未完成 |
+| 6.12 联合出口验收 | core/full build、typecheck、fault/replay/store 契约 | 真正 Web/Tauri 编辑/审批/刷新/取消/undo/恢复 | ⏳ Web build/UI/IDB 与聚焦测试通过；Tauri/真实 BYOK 链未验收 |
+
+**当前 Phase 6 出口状态**：内核与 Web adapter 已满足领域中立契约，既有审批/重放保护的引擎回归通过；但 6.11–6.12 仍是发布阻断项，未完成前不得解除旧 pin、宣称 Tauri 或生产流量已验收。`NativeLLMBackend` 仍排除。
+
+#### 7.7.3 领域中立化与 RimeCut 协同迁移方案（2026-10-13）
+
+以下保留 6.6–6.12 的设计与迁移依据。§5 已同步为 `0.9.0` 目标契约；实现现状以 §7.7.2 状态表为准，未完成的 pin/lock、Tauri 与真实审批恢复验收不得由源码或 Web smoke 代签。
+
+> 状态：6.6–6.10 已实现，6.11–6.12 联合发布验收待完成；2026-10-14。
+> 基线：`0.8.0` commit `f9d4aaec89c4f11bc93251e7fd463b25f8703c3f`；`0.9.0` 工作树含新源码与 dist，但尚无可供 RimeCut 固定 pin 的发布 commit。
+> 取舍：采用“通用内核 + RimeCut 领域 adapter”；不是删除持久化、审批、状态核验或重放保护。`NativeLLMBackend` 不在范围内。
+
+##### 7.7.3.1 问题与目标
+
+`Host-agnostic` 当前主要表示不直接依赖 React、EditorCore、Tauri、DOM 或宿主数据库；还不等于业务领域中立。`src/tool-context-types.ts` 导出必备的 `editor / resolve.element / resolve.track / convert.toInternalUnit / convert.toExternalUnit`；`src/runtime/context-manager.ts` 将宿主事实与必需的整数 `projectRevision` 绑定；checkpoint、审批、恢复和 ledger 传播 `projectId/projectRevision/commandId`；`src/runtime/runtime.ts` 与 `src/runtime/executor.ts` 根据 `undo/redo/restore` 的**字面名称**改变并行调度。`src/runtime/executor.ts` 又从工具业务 `result.data` 拦截 `commandId/projectRevisionBefore/projectRevisionAfter`，可能在工具已产生副作用后因同名业务字段校验失败。
+
+目标：使编辑器词汇只存在于 RimeCut 自有 API/adapter；runtime 保留跨领域必需的“当前权威上下文、外部状态绑定、审批、持久化执行、确定性重放”。面向无项目的查询 agent、使用 Git SHA/ETag 的单资源 agent 和 RimeCut 整数 revision 的编辑 agent 都能使用同一内核，不需要伪造 revision。
+
+非目标：不重写 RimeCut 的 EditorCore、ProjectDocument/ProjectCommand、时间线工具、undo 链、聊天 UI 或 Vercel transport；不提供任意多资源事务、第二 agent 循环、通用分布式锁或“仅靠 agent ledger 保证外部副作用 exactly-once”的错误承诺。本增量只冻结实施目标；schema/版本的具体命名在两仓共同审查后固定，不能依照旧字段直接机械替换。
+
+##### 7.7.3.2 当前真实接入点与工作所有权
+
+- rimeagent：`src/tool-context-types.ts`、`src/types.ts`、`src/tool-types.ts`、`src/runtime/{contracts,context-manager,context-summary,executor,runtime,approval,approval-controller,recovery,history,ledger}.ts`、`src/store/{entries,checkpoint,validation,session-store}.ts` 和 `src/adapters/indexeddb*.ts`。`src/index.ts` 与构建后的 `dist/` 是发布消费面；旧 `runAgentLoop/runAgentSession` 仍有兼容约束。
+- RimeCut：`apps/web/src/lib/ai/agent-runtime.ts` 已创建真实 runtime，打开独立 `rimecut-agent-v1` IndexedDB，并从 `HeadlessSession.describe()` 映射 `projectId/revision.counter/revision.hash`；`apps/web/src/stores/agent-store.ts` 已消费 runtime 事件、审批和恢复；`apps/web/src/lib/ai/tools/tool-context.ts` 继承了旧 `ToolContext`；工具在 `apps/web/src/lib/ai/tools/index.ts` 汇集，插件工具在 `apps/web/src/lib/ai/skills/index.ts` 适配。Web/Tauri package pins 均指向上述 SHA。**不得按先前旧版 `runAgentLoop` 接入说明推断现状。**
+- RimeCut 项目状态的权威来源是活动 `HeadlessSession.describe()` 和宿主 ProjectCommand 结果。`apps/web/src/core/managers/headless-project-adapter.ts` 已按 `expectedRevision` 串行派发命令；runtime 不持有或回滚项目文档。
+
+##### 7.7.3.3 拟冻结的共享契约（两仓先共同审查这一节）
+
+###### 7.7.3.3.1 工具工厂与领域上下文
+
+rimeagent 移除公共 `ToolContext` 的编辑器结构约束。若仍需公共工厂类型，仅允许 `ToolFactory<TContext> = (context: TContext) => AgentTool` 这样的**无领域字段**泛型；更简单的选择是删除未被 runtime 使用的公共工厂类型。不得保留旧 `editor/element/track/convert` 导出作为弃用别名。RimeCut 在自身 `tools/tool-context.ts` 定义现有全部字段与具体类型，保持业务工具的 `createToolContext()` 形状不变，修改的主要是类型 import/extends。检查其他消费者后进行 clean cutover；修改公共导出前检查 TypeScript references。
+
+`AgentMessage.commandCheckpoint` 与 `ToolResultSummary.undoable` 是宿主 UI/undo 元信息，不属于模型可见协议。RimeCut 在自己的展示/项目历史类型中保存命令历史位置与 undo 展示值；runtime 核心的会话 entry 不写这些字段。若旧兼容入口必须暂时保留相同事件/TS 形状，明确限定它们为 legacy 边界，不能扩散进新的 durable entry 或上下文 digest；不以全局重命名破坏 `agent-store.ts` 的 undo 按钮。
+
+###### 7.7.3.3.2 调度只由能力声明决定
+
+删除 `runtime.ts` 和 `executor.ts` 的 `undo/redo/restore` 字符串分支；特设的 agent **内置角色切换协议**仍由既有内核路径处理，不把它误当成普通领域工具。并行充分必要条件仍是显式 opt-in 的 `executor.parallelReadOnly === true` 且工具 `annotations.readOnly === true && executionMode === "parallel"`，只并行连续读组；其他操作严格串行。RimeCut 的 undo/redo/restore、编辑/导出/生成工具必须标 `readOnly: false, executionMode: "serial"`，绝不通过名字暗示隔离。只有真实出现“只读但必须独占”的使用场景才讨论通用独占标注，当前不增加新调度概念。
+
+验收：`undo`、`project.undo` 与其他任意工具名在**相同 annotations** 下行为完全一致；显式串行写/undo 不与相邻读组重叠，读组 `Promise.allSettled`、结果顺序、取消和 ledger 序号保持原语义。
+
+###### 7.7.3.3.3 将模型事实与执行状态分开
+
+采用一个宿主快照接口同时返回两个独立语义，而不是让 runtime 先后调用两次可能观察到不同项目版本的 hook：
+
+```ts
+interface AuthoritativeContext {
+  readonly text: string;       // 宿主生成的当前权威文本，不可来自旧摘要
+  readonly producedBy: "host";
+}
+interface ExternalStateBinding {
+  readonly scopeId: string;    // 被编辑/审批的资源范围；不是 sessionId
+  readonly version: string;    // 不透明版本 token：RimeCut 可用 revision.counter 的十进制字符串
+}
+interface HostSnapshot {
+  readonly authoritativeContext?: AuthoritativeContext;
+  readonly externalStateBinding?: ExternalStateBinding;
+}
+// hooks.getHostSnapshot?(): HostSnapshot：每次读都从同一宿主一致快照取值。
+```
+
+具体导出名称可在实施前调整，但数据语义固定：上下文用于**模型投影**；binding 用于**审批、checkpoint、恢复和外部执行前的拒绝/核验**。`getHostSnapshot?()` 返回的两个字段独立可选；没有绑定的 agent 可省略后一项，没有权威上下文时不能伪造事实。同一返回值必须来自一致宿主快照，而非拼接两次读取的项目版本；每次执行边界重新读取最新快照。摘要永不伪装为当前事实。带绑定的 run 若重开时对应 hook 缺失、scope/version 不一致，fail closed，不因为重新 checkpoint 而接受旧计划。无绑定的 run 不声称防止宿主资源变化；宿主承担新副作用的并发控制。项目命令仍必须用 `expectedRevision` 做原子前置条件：runtime 的边界检查与 host 真正执行之间可能发生并发变化。
+
+`ContextSummarizer` 不再以 `ProjectFactsDigest` 为必备参数。只要有安全 checkpoint/切点及宿主 summarizer，就允许无项目的长会话 compaction；若宿主事实存在，向 summarizer 提供**可选**当前权威上下文。对有绑定的 run，摘要与事实分层、原 confirmed history 与 checkpoint digest 不被篡改。`completedEdits` 改为通用的“已完成工作”字段；旧摘要必须在读取新 schema 前转换，不能凭空补内容。
+
+`ContextProjectInput.projectFacts`、`AgentRuntimeConfig.hooks.getProjectFacts`、`filterTools(..., {projectFacts})`、`ContextSummarizer` 入参及系统事实提示均按同一分层契约迁移；RimeCut 的 skill/toolRefs allowlist 只读可选权威上下文，不能继续把缺失 projectRevision 视为无可用工具。迁移系统提示时保留事实高于历史摘要的优先级，且不要把新的 binding token 当作模型可据以授权操作的权威内容。
+
+RimeCut 映射：从同一次 `HeadlessSession.describe()` 读取 `projectId/revision.counter/revision.hash`；`scopeId = projectId`、`version = String(revision.counter)`。`revision.hash` 可作为宿主生成的权威事实摘要或增强的版本 token，但**同一会话须稳定采用一种编码**。切勿把 timeline 文本当作可靠的项目版本。其它宿主可以提供 commit SHA/ETag；多资源状态不在本次实现，宿主需要自身复合 token 并保证从一致快照得到。宿主若无法保证上下文文本与 descriptor 同时点一致，应将上下文明确视为展示投影而非据以授权执行的证据；binding 仍取权威 descriptor，不能拿到旧事实后谎称新版本。
+
+###### 7.7.3.3.4 业务结果与持久化执行回执分开
+
+`AgentToolResult` 的 `success/message/data` 仍是面向模型的业务结果，`data` 不再有 `commandId/projectRevisionBefore/projectRevisionAfter` 等保留键。单独定义只供 executor/store/ledger 使用的执行回执，含可选 `operationId` 和外部状态变化 `{ before: ExternalStateBinding, after: ExternalStateBinding }`；其值是宿主**真实已提交**的结果，不得根据工具名称或预测的 revision 自行编造。约定新工具执行边界返回 `{ result: AgentToolResult; receipt?: ExecutionReceipt }`；RimeCut 用适配层包装现有工具，普通只读工具可仅返回 `{result}`，真正改变项目状态的工具由 ProjectCommand/HeadlessSession 的已提交返回值提供 receipt。若已有领域工具没有暴露 commandId/前后 revision，要补充其宿主执行路径或保留保守的“非幂等效果不确定时阻断恢复”行为，不可由 adapter 从工具执行前后两次 `describe()` 猜出 operationId；此类改动可能需要触及工具业务调用边界，但不要求重写编辑算法。
+
+接口切换范围：仅新 durable executor 的工具注册采用 `{result, receipt?}` 返回值；旧 `runAgentLoop/runAgentSession` 的 `onToolCall` 与旧 `AgentTool.execute(args): Promise<AgentToolResult>` 在其现有兼容入口内保持原语义。RimeCut 的 durable 注册入口负责一次性将旧领域工具转换到新执行边界，不能在每个结果消费点分别猜测是否为回执。迁移完成后检查所有 `AgentTool.execute` 调用方，避免同一入口混用裸 `AgentToolResult` 与包装结果；不能因给旧工具自动填空回执而绕过非幂等不确定效果阻断。
+
+回执进入 ledger 的固定 schema，不能进入模型可见 `result.data`、session tool result 或媒体 artifact。全局 `toolCallId + argsDigest` intent claim、不可变完整结果 artifact、完成结果优先于当前审批策略的重放规则仍保持；任何回执校验都应尽可能在副作用前完成，已产生外部副作用后的校验/持久化故障必须以原异常显式上报为不确定效果，绝不重新调用非幂等工具。**runtime 的 intent→宿主执行→artifact→ledger→session result 不是跨宿主原子事务**；RimeCut 的 commandId 去重/原子持久化必须覆盖“宿主提交成功、ledger 尚未提交”崩溃窗，不能仅凭新回执宣称 exactly-once。
+
+###### 7.7.3.3.5 状态链、审批与 fail-closed 条件
+
+- checkpoint/审批请求保存 scope/version 及 runId、toolCallId、argsDigest、proposalDigest/严格 JSON artifact 的现有绑定；`resolveApproval` 和恢复时仍拒绝错 scope、错版本、错参数、篡改 preview。
+- 在已确认的 tool_exec 之后发生崩溃：先核对 call/args/artifact/receipt 与本 run，按**有序且连续**的 `before → after` 链从 checkpoint binding 推进到宿主当前 binding，再只重放缓存结果；不得要求已提交效果仍保持执行前版本。不是此情况的版本变化必须拒绝，而非跳过检查。
+- 对不含状态变更回执的只读/无状态调用，不能凭借它解释宿主版本变化；缺失、错链、跨 scope 或 ledger/artifact 错误一律 fail closed。无需绑定的 run 可正常使用审批，但审批仍绑定 call/args/run/session/proposal；若外部状态与审批相关，宿主必须提供 binding。
+- `deny` 落盘后不执行工具；拒绝结果在 checkpoint 前崩溃时仍可对照 durable request/decision/ledger 证据恢复。已提交结果优先于恢复时的新 gate 策略；adapter/ledger 读取失败上抛原错误，不伪装成普通 run_failed。
+
+##### 7.7.3.4 持久化版本与升级方案（两仓集成阻断项）
+
+不能仅改 TS 接口。现有 IndexedDB `rimecut-agent-v1` 保存旧 checkpoint、approval、compaction、ledger/artifact；`src/adapters/indexeddb-database.ts` 还验证严格 object-store/index schema。仅把数据库改名为 `-v2` 再开始空会话，会遗失 pending run/approval，**不算迁移成功**。
+
+1. rimeagent 为新 entry/checkpoint/ledger/compaction/回执定义明确 schema 版本和纯数据转换器；冻结字段映射及拒绝条件，测试 InMemory/IndexedDB 中旧数据的读、转换和重开。旧 `projectId + projectRevision:number` 仅在字段成对、可验证、scope 一致时转为新 `scopeId + String(projectRevision)`；不可解码/不完整数据不能靠缺省值通过校验。旧 `commandId` 与 revision before/after 必须从 ledger 的**已提交记录**转换，不允许扫描 model-visible `data` 猜历史回执。
+2. RimeCut 在切新 pin 前盘点 `rimecut-agent-v1`，指定活动项目/session；暂停新的 agent run/resolve，保存原 DB。若新 schema 可以在现有 stores 内版本升级，事务性迁移并验证记录数、索引、所有 checkpoint/approval/ledger 引用；若采用新 DB，先完整复制到新 DB、验证后才切换入口，保留旧 DB 以便回滚和人工恢复。任何失败维持旧库、旧 pin，不在两个版本之间交替向同一 schema 写入。迁移过程不执行工具、不请求模型、不批准任务。
+3. 对旧的**终态** run，允许验证后保留可读历史；对旧的**未完成/待审批** run，逐一核验 run head、checkpoint digest、工具 intent/execution、原 project identity/revision、preview artifact 与宿主当前状态。能无歧义映射且状态匹配者迁移原 runId/toolCallId/seq；无法证明的任务**标记为需要人工处理并阻止继续执行**，不自动清空旧 binding 或静默转为新 run。旧 session/tool_result 的原始业务 JSON 应原样保留供 digest 与回放校验，即使它带有旧同名 `data.commandId`；仅从旧 ledger 的已提交元数据建立新回执。若旧工具副作用已发生而 ledger 缺回执，宿主须用其 command log/idempotency 机制核实；不能核实就阻断，不能自动再执行。
+4. RimeCut 现有项目文档聊天 UI 镜像及 `agent-store.ts` 的 `commandCheckpoint`/`undoable` 只在宿主展示/历史数据中迁移；切勿把 agent checkpoint 当作项目 rollback。旧兼容入口的类型/语义是否保留，应按真实调用方和 `docs/rimeagent-design.md` 的 1.0 兼容承诺明确决议，不提供运行时双写或长期别名来隐藏未迁移消费方。
+
+迁移工具应可重复运行且已转换记录不会被二次转换；验收覆盖事务中断、断电窗模拟、重复迁移、回滚保留旧库、未知 schema 拒绝、跨 session 错绑、Tauri 共用 Web 存储路径。如果发现 Tauri 使用另一个数据库适配器，按同一 contract test 验证，不因同一 UI 假设它已覆盖。
+
+##### 7.7.3.5 双仓并行顺序与交接物
+
+| 阶段 | rimeagent 负责人 | RimeCut 负责人 | 必须共享的交付 |
+|---|---|---|---|
+| A. 冻结契约 | 按 §7.7.3.3 确认 TS 类型、entry/ledger/schema 版本、错误与迁移边界 | 确认 HeadlessSession 状态版本、ProjectCommand 回执、plugin 工具可用字段、旧库样本 | 一份两仓共识的类型与 JSON fixture；标注兼容入口与不能迁移的记录 |
+| B. 可并行的代码 | 改工具上下文类型、调度去名称特判、事实/绑定分离、result/receipt、持久化转换器与新 schema 的测试 | 本地拥有工具上下文；给所有工具与插件按 annotations 定义策略，梳理真实命令回执；准备新宿主 adapter 与审批 UI/undo 信息的自有类型 | 分支各自测试；RimeCut 暂不改 pin、不得拿未冻结的契约填假字段 |
+| C. 集成（依赖 B） | 发布含 `dist/` 的固定 Git commit，完整 runtime/adapter contract 通过 | Web/Tauri 同 pin，更新 Bun lockfile；接入新事实/绑定/回执与迁移工具；从旧库核验恢复 | 宿主对新 commit 的 lockfile、迁移记录、失败/恢复样例 |
+| D. 联合验证 | 跑 core/build/typecheck、内存和 IndexedDB crash/fault/replay 契约 | Web/Tauri 真实 UI 的编辑、审批、取消、刷新、undo/redo、崩溃恢复与项目状态校验 | 两仓可复现验收记录；未通过不解除旧 pin 或切流量 |
+
+不要让 rimeagent 和 RimeCut 同时编辑对方仓库文件；双方以 A 阶段的契约/fixture 为边界并行。RimeCut `apps/web/src/lib/ai/agent-runtime.ts` 是主要映射点，`apps/web/src/stores/agent-store.ts` 保持 UI 镜像与审批按钮职责；项目命令仍通过 `@rimecut/api/headless`，不是绕过它写 EditorCore 内存状态。若 `ToolFactory` 只由宿主使用，原则上删 core 类型比创建多层新抽象更可维护。
+
+##### 7.7.3.6 可执行验收表
+
+- **零项目宿主**：只有自定义 `search`、无状态 binding，模型、工具、审批与 compaction 能运行；不要求 `projectRevision: 0`。采用 ETag/SHA 的宿主可恢复，错版本阻断，不需整数版本。
+- **RimeCut 一致性**：同一项目 revision 不变才执行待审批工具；前序同批次编辑改变版本时，后续旧审批不得执行；undo/redo/restore 仍按策略串行，并由宿主实际命令链驱动。
+- **工具结果命名空间**：`data.commandId` 或 `data.projectRevisionBefore` 等任意业务 JSON 值不被 runtime 当元数据读取/拒绝；真实 receipt 独立进入 ledger 且不暴露给模型。
+- **副作用窗口**：提交结果优先重放且不重复调用工具；未完成非幂等 intent 阻断；确定性 deny 恢复；相同 resolve 重入不重复通知；持久化故障原样抛出。
+- **迁移**：旧终态记录可读；旧待审批可验证者沿相同 run/call ID 继续，错 revision/篡改 proposal/缺回执者明确阻断；重复运行迁移与中途失败不丢数据。两个宿主 pin/lock 一致，旧 DB 可回滚。
+- **无回归**：`runAgentLoop/runAgentSession` 已承诺的兼容行为、backend routing、事件 v2、安全的 compaction 切点与最新宿主事实投影不变；全套测试、typecheck、完整/core build 加真实 Web/Tauri 表面验收。
+
+双仓验证命令（根目录执行；命令退出码 0 且完整输出无失败才可声称通过）：rimeagent 运行 `bun test && bun run typecheck && npm run build && bun run build:core`；RimeCut 运行 `bun install --frozen-lockfile`、`bun run test:ts`、`bun run typecheck`、`bun run build:web`，并按仓库 `bun run test:e2e:win`/对应平台 UI 流程观察真正审批与恢复。宿主项目命令/撤销链还需执行真实 headless 命令契约测试；若 CI 提供 `bun run test:rust`，在合入前覆盖。只为方案文档本身验收时不运行全套代码验证，但须检查上述路径、pin、schema 契约均对应当下仓库。
+
+##### 7.7.3.7 风险与明确约束
+
+- 历史 checkpoint 的 `contextDigest` 只覆盖模型可见字段，转换 UI `commandCheckpoint` 本身不需重新 hash；但改动**持久化 tool result 的 JSON 形状**、摘要 schema 或工具调用内容会改变投影，应验证旧 digest 与迁移后的同一 projection 一致，不能直接改写 hash 或重算后假称未被篡改。
+- 版本 token 是一致性比较值，不是身份鉴权或密码学签名；scopeId 必须来自当前宿主权威状态，不可信工具结果不能替代宿主核验。外部效果 receipt 也只是宿主提供的恢复证据，不能替代原项目 command log。
+- 旧 RimeCut 工具大量返回 `undoable` 且 UI 依赖它；删除这些字段前必须完成 UI 类型和镜像迁移。插件 `PluginToolResult` 与插件公开 API 由 RimeCut 决定兼容/破坏性升级，不由 rimeagent 静默改变。
+- 本方案完成前可以继续在固定 `0.8.0` 集成上工作；**不能**以仅编译通过或新会话 smoke 通过宣布旧持久化会话可安全升级。
 
 
 ### 7.8 Phase 7：CLI/MCP/parity 对接（2.5 周）
@@ -819,7 +954,7 @@ Phase 6 实施冻结补充（2026-10-12）：
 
 | 任务 | 文件 | 要点 | 验收 |
 |---|---|---|---|
-| 7.1 ledger ↔ project.log/diff 关联导出 | `src/runtime/ledger.ts` | `query(runId)` 输出含 commandId/revision 的可序列化报告（与 `project.log` 按 commandId join 的形状） | 报告 schema 测试 |
+| 7.1 ledger ↔ 宿主操作日志关联导出 | `src/runtime/ledger.ts` | 依赖 P6 中立契约：导出 operationId、外部状态变化的可序列化报告；RimeCut adapter 映射到 project.log 的 commandId/revision | 通用报告 schema 与宿主映射测试 |
 | 7.2 MCP 工具桥 | `src/mcp.ts`（扩展） | `MCPToolProvider.listTools()` 产出带 annotations 的 AgentTool；MCP 与内置工具经同一 executor/审批/ledger | mock provider 经 executor 的全生命周期测试 |
 | 7.3 contract test 发布 | `tests/contract/` | store/ledger/approval 的可复用 contract test 套件（宿主 adapter 与 rimecraft 复用） | 套件作为导出（`./contract`）可被外部仓 import 运行 |
 | 7.4 parity 支持 | 与 rimecut 仓协作 | 同一 golden task 在 Web/Tauri/CLI 三宿主的 journal 对比需要的引擎侧数据（ledger 报告 + 事件流录制/回放） | 事件流录制→回放产生相同 ledger |
@@ -847,16 +982,18 @@ v0.2.0 ──► v0.3.0 ──► v0.4.0 ──► v0.5.0 ──► v0.6.0 ─�
 ```
 
 每 Phase 的宿主切换由上游阶段验收触发，本仓只保证该版本出口条件成立；pin commit 必须包含 `dist/`（附录 D）。
+P6 的 `0.9.0` 工作树已实现领域中立内核与 Web adapter，但 6.11 的双仓固定 pin/lock 和 6.12 的 Tauri/真实审批恢复联合验收仍未完成；这些门禁通过前不得进入 P7/P8 或切生产流量。
+
 
 ## 8. 验收与质量门禁
 
 ### 引擎契约（本仓 CI 强制）
 
-- session entry 全 kind 在 InMemory / IndexedDB / 宿主 adapter 三实现 round-trip 一致（contract test 套件）；
-- checkpoint `contextDigest` / `parentId` / `projectRevision` 引用可验证；
-- 事件 v2：未知 `type` 安全忽略；`seq` 单调；取消后无"运行中"假状态；
-- approval resume 不重复执行已提交 toolCallId（重放保护）；
-- compaction 后投影必含最新 `ProjectFactsDigest`（不变量 6）；
+- session entry 全 kind 在 InMemory / IndexedDB 实现 round-trip 一致；宿主其它 adapter 仍需复用 contract suite；
+- checkpoint `contextDigest` / `parentId` / `externalStateBinding` 与完整 receipt provenance 可验证；
+- 事件 v2：未知 `type` 安全忽略；`seq` 单调；取消后无“运行中”假状态；
+- approval resume 不重复执行已提交且同 run/call/args 绑定的调用；
+- compaction 后投影注入同一 `HostSnapshot` 的最新可选权威上下文，无项目宿主可 compact；
 - 兼容入口 `runAgentLoop` / `runAgentSession` 输出快照不回归。
 
 ### 发布阻断条件（上游 §12.11 收敛到引擎可测项）

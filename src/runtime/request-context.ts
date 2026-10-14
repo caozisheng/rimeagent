@@ -5,7 +5,7 @@ import type { AgentRuntimeEventPayload } from "../events";
 import type { NormalizedError } from "../errors";
 import type { LedgerRecord } from "./ledger";
 import type { IterationRequestInput, PreparedIterationRequest } from "./iteration";
-import type { ContextProjection, ContextProjectInput, ProjectFactsDigest } from "./context-manager";
+import type { ContextProjection, ContextProjectInput, AuthoritativeContext } from "./context-manager";
 import { createContextManager } from "./context-manager";
 import { prepareAgentRequest } from "../service";
 
@@ -56,7 +56,7 @@ export function createRuntimeRequestContext(options: RequestContextOptions): Run
     options.signal.throwIfAborted();
     const events: AgentRuntimeEventPayload[] = [];
     const hooks = options.config.hooks;
-    let facts: ProjectFactsDigest | undefined = hooks?.getProjectFacts?.();
+    let facts: AuthoritativeContext | undefined = hooks?.getHostSnapshot?.()?.authoritativeContext;
     const budget = manager.getBudget(input.params.llmConfig);
     const baseCap = input.params.llmConfig.maxOutputTokens ?? budget.reserveOutputTokens;
     if (!Number.isSafeInteger(baseCap) || baseCap < 1) throw new TypeError("maxOutputTokens must be a positive safe integer");
@@ -77,7 +77,7 @@ export function createRuntimeRequestContext(options: RequestContextOptions): Run
     let tools = request.tools;
     if (input.attempt >= 3 && hooks?.filterTools) {
       const names = await hooks.filterTools(tools, {activeRoleId: input.params.activeRoleId ?? input.params.expertRoleId,
-        projectFacts: facts, failures: input.failures});
+        authoritativeContext: facts, failures: input.failures});
       if (!Array.isArray(names) || names.some(name => typeof name !== "string" || !tools.some(tool => tool.function.name === name))) {
         throw new TypeError("filterTools must return registered tool names");
       }
@@ -85,7 +85,7 @@ export function createRuntimeRequestContext(options: RequestContextOptions): Run
       tools = tools.filter(tool => allowed.has(tool.function.name));
     }
     const projectInput: ContextProjectInput = {llmConfig,systemPrompt: request.messages[0]?.content ?? "",tools,
-      projectFacts: facts, forceCompact: input.attempt === 1, signal: options.signal};
+      authoritativeContext: facts, forceCompact: input.attempt === 1, signal: options.signal};
     let projection = await manager.project(projectInput);
     async function recordCompaction(value: ContextProjection): Promise<void> {
       if (!value.compaction) return;
@@ -95,15 +95,15 @@ export function createRuntimeRequestContext(options: RequestContextOptions): Run
     await recordCompaction(projection);
     if (projection.compacted) {
       options.signal.throwIfAborted();
-      facts = hooks?.getProjectFacts?.();
+      facts = hooks?.getHostSnapshot?.()?.authoritativeContext;
       params = buildParams();
       request = prepareAgentRequest(params);
-      projection = await manager.project({...projectInput,systemPrompt:request.messages[0]?.content ?? "",projectFacts:facts,forceCompact:false});
+      projection = await manager.project({...projectInput,systemPrompt:request.messages[0]?.content ?? "",authoritativeContext:facts,forceCompact:false});
       await recordCompaction(projection);
     }
     options.signal.throwIfAborted();
     await options.assertBoundary();
-    // Project facts and historical summary are explicit layers before dynamic context.
+    // Current authoritative host context and historical summary are explicit layers before dynamic context.
     const contextLayers = projection.messages.filter(message => message.role === "system")
       .map(message => ({id:message.id,content:message.content,priority:25}));
     const prepared = prepareAgentRequest({...params,messages:projection.messages.filter(message => message.role !== "system"),

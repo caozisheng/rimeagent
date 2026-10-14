@@ -57,7 +57,7 @@ async function fixture(entries: AgentSessionEntry[]) {
 });
 
  test("huge failed JSON results are bounded without leaking data and immutable artifacts survive reprojection and reopen", async () => {
-	const result = { success: false, message: "operation failed " + "x".repeat(10000), data: { privatePayload: "SECRET_RAW".repeat(20000) }, undoable: false };
+	const result = { success: false, message: "operation failed " + "x".repeat(10000), data: { privatePayload: "SECRET_RAW".repeat(20000) } };
 	const options = await fixture([
 		{ kind: "assistant_message", id: "a", ts: 1, content: "", toolCalls: [call("c")] },
 		{ kind: "tool_result", id: "r", ts: 2, toolCallId: "c", result },

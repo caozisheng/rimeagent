@@ -1,5 +1,5 @@
 export type { AgentStatus, AgentLLMConfig, AgentMessage, AgentEvent, TokenUsage, ToolDefinition, ToolCall, ToolResultSummary, StreamChunk, OpenAIMessage, LLMProvider, } from "./types";
-export type { AgentTool, AgentToolAnnotations, AgentToolResult, ToolSuggestion } from "./tool-types";
+export type { AgentTool, DurableAgentTool, DurableToolExecution, ExecutionReceipt, ExternalStateBinding, AgentToolAnnotations, AgentToolResult, ToolSuggestion } from "./tool-types";
 export { agentToolToDefinition } from "./tool-types";
 export type { ToolRegistryInstance } from "./tool-registry";
 export { ToolRegistry, createToolRegistry } from "./tool-registry";
@@ -18,7 +18,6 @@ export { SkillRegistry, createSkillRegistry } from "./skills";
 export type { MCPToolProvider, MCPRegistryInstance } from "./mcp";
 export { MCPRegistry, createMCPRegistry } from "./mcp";
 export type { RetrievalConfig, ToolFailure, RagBuilder, ErrorRecoveryBuilder } from "./rag-types";
-export type { ToolContext, ToolFactory } from "./tool-context-types";
 export type { SkillKnowledgeEntry, AgentSkillWithKnowledge } from "./skill-types";
 export type { RunAgentLoopParams } from "./service";
 export { runAgentLoop, SWITCH_ROLE_TOOL_NAME } from "./service";
@@ -30,6 +29,8 @@ export { isAgentSessionEntry, serializeAgentSessionEntry, parseAgentSessionEntry
 export type { AgentSessionEntry, AgentSessionSnapshot } from "./store/entries";
 export { InMemorySessionStore } from "./store/session-store";
 export type { AgentSessionStore } from "./store/session-store";
+export { AGENT_STORE_SCHEMA_VERSION, convertLegacyCheckpoint, convertLegacyEntry, convertLegacyLedger, convertLegacySession } from "./store/schema-migration";
+export type { LegacySessionGroup } from "./store/schema-migration";
 export { computeContextDigest } from "./store/checkpoint";
 export type { AgentCheckpoint, AgentCheckpointRef, AgentBranch } from "./store/checkpoint";
 export { InMemoryArtifactStore } from "./store/artifact-store";
@@ -43,7 +44,7 @@ export type { ToolExecutorConfig } from "./runtime/executor";
 export { createDefaultApprovalGate, computeProposalDigest, validateProposalDecision } from "./runtime/approval";
 export type { ApprovalGate, ApprovalResolution, PreflightDecision, ToolCallContext, DefaultApprovalGateOptions } from "./runtime/approval";
 export { createContextManager } from "./runtime/context-manager";
-export type { ContextManagerConfig, ContextProjection, ProjectFactsDigest, ContextManager, ContextManagerOptions, ContextProjectInput, ContextBudget, ContextSummary, SummarizeContextInput, ContextSummarizer, } from "./runtime/context-manager";
+export type { ContextManagerConfig, ContextProjection, HostSnapshot, AuthoritativeContext, ContextManager, ContextManagerOptions, ContextProjectInput, ContextBudget, ContextSummary, SummarizeContextInput, ContextSummarizer, } from "./runtime/context-manager";
 export { createAgentRuntime } from "./runtime/runtime";
 export type { AgentRuntime, AgentRuntimeConfig, AgentRuntimeState } from "./runtime/contracts";
 //# sourceMappingURL=index.d.ts.map

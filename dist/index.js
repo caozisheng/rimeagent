@@ -13,6 +13,7 @@ export { runAgentSession } from "./session";
 export { AGENT_RUNTIME_EVENT_VERSION, createAgentRuntimeEvent, parseAgentRuntimeEvent } from "./events";
 export { isAgentSessionEntry, serializeAgentSessionEntry, parseAgentSessionEntry } from "./store/entries";
 export { InMemorySessionStore } from "./store/session-store";
+export { AGENT_STORE_SCHEMA_VERSION, convertLegacyCheckpoint, convertLegacyEntry, convertLegacyLedger, convertLegacySession } from "./store/schema-migration";
 export { computeContextDigest } from "./store/checkpoint";
 export { InMemoryArtifactStore } from "./store/artifact-store";
 export { InMemoryLedger, isLedgerRecord } from "./runtime/ledger";

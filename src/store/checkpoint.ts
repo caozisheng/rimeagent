@@ -1,4 +1,5 @@
 import type { AgentMessage } from "../types";
+import type { ExternalStateBinding } from "../tool-types";
 import { canonicalJson } from "./json";
 import { isId, isRecord, isToolCalls } from "./validation";
 
@@ -12,17 +13,13 @@ export interface AgentCheckpoint {
 	readonly label?: string;
 	readonly runId?: string;
 	readonly seq?: number;
-	readonly projectId?: string;
-	readonly projectRevision?: number;
-	readonly projectCheckpointId?: string;
+	readonly externalStateBinding?: ExternalStateBinding;
 }
 
 export interface AgentCheckpointRef {
 	readonly checkpointId: string;
 	readonly sessionId: string;
-	readonly projectId?: string;
-	readonly projectRevision?: number;
-	readonly projectCheckpointId?: string;
+	readonly externalStateBinding?: ExternalStateBinding;
 	readonly contextDigest: string;
 }
 

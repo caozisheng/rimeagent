@@ -1,15 +1,19 @@
 import type { ToolCall } from "../types";
-import type { AgentTool, AgentToolResult } from "../tool-types";
+import type { DurableAgentTool, AgentToolResult, ExternalStateBinding } from "../tool-types";
 import type { AgentArtifactStore } from "../store/artifact-store";
 import type { RuntimeLedger } from "./ledger";
-import type { ProjectFactsDigest } from "./context-manager";
+import type { HostSnapshot } from "./context-manager";
 import type { ApprovalGate, PreflightDecision } from "./approval";
 export interface ToolExecutorContext {
     readonly runId: string;
     readonly nextSeq: () => number;
     readonly signal?: AbortSignal;
-    /** Reads the host's current project identity at approval time. */
-    readonly projectFacts?: () => ProjectFactsDigest | undefined;
+    /** A coherent current host snapshot, including the external state binding. */
+    readonly getHostSnapshot?: () => HostSnapshot | undefined;
+    /** Bound run's latest verified state. Missing snapshots fail closed. */
+    readonly expectedBinding?: () => Promise<ExternalStateBinding | undefined>;
+    /** Advances the active run only after a validated execution and ledger commit. */
+    readonly onCommittedStateChange?: (after: ExternalStateBinding) => void;
     /** Durable, call-specific decisions validated by the runtime before execution. */
     readonly approvalDecisions?: Readonly<Record<string, "allow" | "deny">>;
     /** Marks adapter failures during preflight without changing the original exception. */
@@ -26,7 +30,7 @@ export interface ToolExecutorConfig {
 }
 export interface ToolExecutorOptions {
     readonly sessionId: string;
-    readonly tools: readonly AgentTool[];
+    readonly tools: readonly DurableAgentTool[];
     readonly ledger: RuntimeLedger;
     readonly artifactStore: AgentArtifactStore;
     readonly approval?: ApprovalGate;

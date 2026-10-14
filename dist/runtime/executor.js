@@ -2,7 +2,7 @@ import { nanoid } from "nanoid";
 import { normalizeError } from "../errors";
 import { computeContextDigest } from "../store/checkpoint";
 import { canonicalJson, cloneJson } from "../store/json";
-import { isCount, isId, isRecord, isToolCall, isToolResult } from "../store/validation";
+import { isId, isRecord, isToolCall, isToolResult, isExecutionReceipt, isExternalStateBinding, hasOnlyKeys } from "../store/validation";
 import { validateProposalDecision } from "./approval";
 const textEncoder = new TextEncoder();
 const TOOL_RESULT_CONTENT_TYPE = "application/json";
@@ -30,26 +30,15 @@ function parseArguments(call) {
         return null;
     }
 }
-function validateResultMetadata(result) {
-    if (result.data === undefined)
-        return {};
-    if (!isRecord(result.data))
-        throw new TypeError("Tool result data must be a plain object");
-    for (const key of ["commandId", "projectRevisionBefore", "projectRevisionAfter"]) {
-        if (!Object.hasOwn(result.data, key))
-            continue;
-        const value = result.data[key];
-        if (key === "commandId" && !isId(value))
-            throw new TypeError("Invalid tool result commandId");
-        if ((key === "projectRevisionBefore" || key === "projectRevisionAfter") && !isCount(value)) {
-            throw new TypeError(`Invalid tool result ${key}`);
-        }
+function validateExecution(value) {
+    if (!isRecord(value) || !hasOnlyKeys(value, ["result", "receipt"]) || !isToolResult(value.result)
+        || Object.hasOwn(value.result, "undoable") || (value.receipt !== undefined && !isExecutionReceipt(value.receipt))) {
+        throw new TypeError("Tool returned an invalid durable execution");
     }
-    return {
-        ...(Object.hasOwn(result.data, "commandId") ? { commandId: result.data.commandId } : {}),
-        ...(Object.hasOwn(result.data, "projectRevisionBefore") ? { projectRevisionBefore: result.data.projectRevisionBefore } : {}),
-        ...(Object.hasOwn(result.data, "projectRevisionAfter") ? { projectRevisionAfter: result.data.projectRevisionAfter } : {}),
-    };
+    return { result: value.result, ...(value.receipt === undefined ? {} : { receipt: value.receipt }) };
+}
+function sameBinding(before, after) {
+    return before?.scopeId === after?.scopeId && before?.version === after?.version;
 }
 function replayError(message, toolName) {
     throw normalizeError(new Error(message), { toolName });
@@ -81,9 +70,10 @@ export function createToolExecutor(options) {
                 context.onPersistenceFailure?.();
                 throw cause;
             }
+            if (completed && (completed.runId !== context.runId || ((completed.event.kind === "tool_intent" || completed.event.kind === "tool_exec")
+                && (completed.event.tool !== call.function.name || completed.event.argsDigest !== argsDigest(call)))))
+                replayError("Tool call id was reused with different run or arguments", call.function.name);
             if (completed?.event.kind === "tool_exec") {
-                if (completed.event.tool !== call.function.name || completed.event.argsDigest !== argsDigest(call))
-                    replayError("Tool call id was reused with different arguments", call.function.name);
                 // Policy controls new effects, never rewrites an already committed outcome.
                 return { action: "allow" };
             }
@@ -97,13 +87,14 @@ export function createToolExecutor(options) {
             const annotations = tools.get(call.function.name)?.annotations;
             return annotations?.requiresApproval || annotations?.destructive ? { action: "suspend", reason: "Tool requires approval" } : { action: "allow" };
         }
-        const facts = context.projectFacts?.();
+        const binding = context.getHostSnapshot?.()?.externalStateBinding;
+        if (binding !== undefined && !isExternalStateBinding(binding))
+            throw new TypeError("Invalid host state binding");
         return validateProposalDecision(await options.approval.preflight({
             runId: context.runId,
             toolCall: call,
             ...(tools.get(call.function.name)?.annotations === undefined ? {} : { annotations: tools.get(call.function.name).annotations }),
-            ...(facts?.projectId === undefined ? {} : { projectId: facts.projectId }),
-            ...(facts === undefined ? {} : { projectRevision: facts.projectRevision }),
+            ...(binding === undefined ? {} : { externalStateBinding: binding }),
         }));
     };
     const readCachedResult = async (record) => {
@@ -115,8 +106,8 @@ export function createToolExecutor(options) {
             || !isToolResult(artifact.value)) {
             throw new Error("Missing or corrupt cached tool result artifact");
         }
-        if ((record.event.outcome === "success") !== artifact.value.success) {
-            throw new Error("Cached tool result outcome does not match ledger");
+        if ((record.event.outcome === "success") !== artifact.value.success || digest(artifact.value.message) !== record.event.messageDigest) {
+            throw new Error("Cached tool result does not match ledger");
         }
         return cloneJson(artifact.value);
     };
@@ -130,8 +121,11 @@ export function createToolExecutor(options) {
             return failure("Invalid JSON arguments");
         const tool = tools.get(call.function.name);
         const callArgsDigest = argsDigest(call);
+        const expected = await context.expectedBinding?.();
         const prior = await options.ledger.getToolExecution(call.id);
         if (prior) {
+            if (prior.runId !== context.runId)
+                replayError("Tool call id belongs to another run", call.function.name);
             if (prior.event.kind !== "tool_intent" && prior.event.kind !== "tool_exec")
                 throw new Error("Invalid tool replay record");
             if (prior.event.tool !== call.function.name || prior.event.argsDigest !== callArgsDigest) {
@@ -163,25 +157,39 @@ export function createToolExecutor(options) {
             // whether the winning writer has already performed its external side effect.
             await options.ledger.append({ runId: context.runId, seq: context.nextSeq(), ts: Date.now(), event: { kind: "tool_intent", toolCallId: call.id, tool: call.function.name, argsDigest: callArgsDigest } });
         }
-        let result;
+        const observed = context.getHostSnapshot?.()?.externalStateBinding;
+        if (!sameBinding(expected, observed))
+            replayError("External state changed before tool execution", call.function.name);
+        let raw;
         try {
-            result = await tool.execute(parsed);
+            raw = await tool.execute(parsed);
         }
         catch (cause) {
+            // An uncertain non-idempotent effect is not a normal tool failure.
+            if (!tool?.annotations?.readOnly && !tool?.annotations?.idempotent)
+                throw cause;
             const error = normalizeError(cause, { toolName: call.function.name });
-            result = failure(error.message);
+            raw = { result: failure(error.message) };
         }
-        if (!isToolResult(result))
-            throw new TypeError("Tool returned an invalid result");
-        const metadata = validateResultMetadata(result);
+        const { result, receipt } = validateExecution(raw);
+        // No validation/persistence fault after a committed effect can be mistaken for a tool failure.
+        const change = receipt?.stateChange;
+        if (change && (!expected || !sameBinding(change.before, expected) || change.after.scopeId !== expected.scopeId)) {
+            throw new TypeError("Tool receipt does not continue the external state binding");
+        }
+        const latest = context.getHostSnapshot?.()?.externalStateBinding;
+        if (!sameBinding(change?.after ?? expected, latest))
+            throw new Error("Host state does not match the committed tool receipt");
         const artifactId = nanoid();
         await options.artifactStore.put({ artifactId, sessionId: options.sessionId, contentType: TOOL_RESULT_CONTENT_TYPE, value: cloneJson(result) });
         const event = {
             kind: "tool_exec", toolCallId: call.id, tool: call.function.name, argsDigest: callArgsDigest,
             outcome: result.success ? "success" : "failure", messageDigest: digest(result.message), artifactId,
-            ...metadata,
+            ...(receipt === undefined ? {} : { receipt }),
         };
         await options.ledger.append({ runId: context.runId, seq: context.nextSeq(), ts: Date.now(), event });
+        if (change)
+            context.onCommittedStateChange?.(change.after);
         return cloneJson(result);
     };
     const executeBatch = async (calls, context) => {
@@ -195,7 +203,7 @@ export function createToolExecutor(options) {
         const approvalAllowed = (index) => decisions[index].action === "allow" && (options.approval !== undefined || context.approvalDecisions?.[calls[index].id] === "allow");
         const isParallelRead = (call) => {
             const annotations = tools.get(call.function.name)?.annotations;
-            return options.executor?.parallelReadOnly === true && call.function.name !== "undo" && call.function.name !== "redo" && call.function.name !== "restore"
+            return options.executor?.parallelReadOnly === true
                 && annotations?.readOnly === true && annotations.executionMode === "parallel";
         };
         for (let index = 0; index < calls.length;) {

@@ -9,11 +9,12 @@ import type { AgentRuntimeEvent, AgentRuntimeEventPayload } from "../events";
 import { createAgentRuntimeEvent } from "../events";
 import { normalizeError } from "../errors";
 import type { AgentErrorCategory } from "../errors";
-import { createToolRegistry } from "../tool-registry";
+import { agentToolToDefinition } from "../tool-types";
+import type { ExternalStateBinding } from "../tool-types";
 import { runSessionIterations } from "./iteration";
 import type { IterationOutcome, IterationStream } from "./iteration";
 import { RuntimeHistory, assertCompleteHistory, projectMessages } from "./history";
-import { assertNewRun, loadResumeState, rejectRecovery } from "./recovery";
+import { assertNewRun, loadResumeState, rejectRecovery, verifiedStateBinding } from "./recovery";
 import type { ResumeState } from "./recovery";
 import { createRuntimeRequestContext } from "./request-context";
 import type { LedgerRecord, RuntimeLedger } from "./ledger";
@@ -22,6 +23,7 @@ import { createToolExecutor } from "./executor";
 import type { AgentRuntime, AgentRuntimeConfig, AgentRuntimeState } from "./contracts";
 import { createDefaultApprovalGate } from "./approval";
 import { createRuntimeApproval } from "./approval-controller";
+import { isExternalStateBinding } from "../store/validation";
 
 type CompatibilitySession = { params: AgentSessionParams; config: AgentSessionConfig };
 
@@ -37,11 +39,11 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 		approval: gate, executor: config.executor });
 	let approvalFailures = 0;
 	const approval = createRuntimeApproval({sessionId: config.sessionId, sessionStore: config.sessionStore, artifactStore, ledger, history, executor, gate,
-		facts: config.hooks?.getProjectFacts, onPersistenceFailure: () => { approvalFailures++; }});
-	const registry = createToolRegistry();
+		getHostSnapshot: config.hooks?.getHostSnapshot, onPersistenceFailure: () => { approvalFailures++; }});
+	const registered = new Map<string, (typeof config.tools)[number]>();
 	for (const tool of config.tools) {
-		if (registry.get(tool.name)) throw new TypeError(`Duplicate runtime tool: ${tool.name}`);
-		registry.register(tool);
+		if (registered.has(tool.name)) throw new TypeError(`Duplicate runtime tool: ${tool.name}`);
+		registered.set(tool.name, tool);
 	}
 	let state: AgentRuntimeState = "idle";
 	let active: AbortController | undefined;
@@ -68,6 +70,7 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 		let validated = false;
 		let terminal = false;
 		let lastCheckpoint: AgentCheckpointRef | undefined;
+		let confirmedBinding: ExternalStateBinding | undefined;
 		let iterator: IterationStream | undefined;
 		let approvalDecisions: Readonly<Record<string, "allow" | "deny">> = Object.create(null);
 		const nextSeq = () => ++seq;
@@ -84,21 +87,29 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 			await history.append({ kind: "run_state", runId, seq, iteration, phase, activeRoleId,
 				...(lastCheckpoint === undefined ? {} : { checkpointId: lastCheckpoint.checkpointId }) });
 		}
-		async function boundary(label?: string): Promise<AgentCheckpointRef> {
-			const facts = config.hooks?.getProjectFacts?.();
-			lastCheckpoint = await history.checkpoint(label, compatibility ? undefined : {
-				runId, seq: nextSeq(), ...(facts === undefined ? {} : { projectFacts: facts }) });
-			return lastCheckpoint;
+		async function expectedBinding() {
+			return confirmedBinding;
 		}
-		async function assertProjectBoundary(): Promise<void> {
+		async function assertStateBoundary() {
 			if (!lastCheckpoint || compatibility) return;
-			const facts = config.hooks?.getProjectFacts?.();
-			if (lastCheckpoint.projectRevision !== undefined && facts?.projectRevision !== lastCheckpoint.projectRevision) rejectRecovery("Project revision changed before external execution");
-			if (lastCheckpoint.projectId !== undefined && facts?.projectId !== lastCheckpoint.projectId) rejectRecovery("Project identity changed before external execution");
+			const expected = await expectedBinding();
+			const observed = config.hooks?.getHostSnapshot?.()?.externalStateBinding;
+			if (observed !== undefined && !isExternalStateBinding(observed)) rejectRecovery("Invalid host state binding");
+			if (expected?.scopeId !== observed?.scopeId || expected?.version !== observed?.version) rejectRecovery("External state changed before execution");
+		}
+		async function boundary(label?: string): Promise<AgentCheckpointRef> {
+			const expected = await expectedBinding();
+			const observed = config.hooks?.getHostSnapshot?.()?.externalStateBinding;
+			if (observed !== undefined && !isExternalStateBinding(observed)) rejectRecovery("Invalid host state binding");
+			if (lastCheckpoint && !compatibility && (expected?.scopeId !== observed?.scopeId || expected?.version !== observed?.version)) rejectRecovery("External state changed before checkpoint");
+			lastCheckpoint = await history.checkpoint(label, compatibility ? undefined : {
+				runId, seq: nextSeq(), ...(observed === undefined ? {} : { externalStateBinding: observed }) });
+			confirmedBinding = observed;
+			return lastCheckpoint;
 		}
 		async function assertHostBoundary(): Promise<void> {
 			if (!lastCheckpoint || compatibility) return;
-			await assertProjectBoundary();
+			await assertStateBoundary();
 			if (computeContextDigest(projectMessages(await history.entries())) !== lastCheckpoint.contextDigest) rejectRecovery("Context digest changed before external execution");
 		}
 		async function event(payload: AgentRuntimeEventPayload): Promise<AgentRuntimeEvent> {
@@ -124,13 +135,14 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 			let restored: ResumeState | undefined;
 			let messages: AgentMessage[];
 			if (resumeId !== undefined) {
-				restored = await loadResumeState(history, ledger, resumeId, config.hooks?.getProjectFacts?.(), artifactStore);
+				restored = await loadResumeState(history, ledger, resumeId, config.hooks?.getHostSnapshot, artifactStore);
 				messages = restored.messages;
 				seq = restored.seq;
 				iteration = restored.iteration;
 				phase = restored.phase;
 				activeRoleId = restored.activeRoleId;
 				lastCheckpoint = restored.checkpoint;
+				confirmedBinding = restored.checkpoint.externalStateBinding;
 				llmConfig = config.hooks?.onRoleSwitch?.(activeRoleId) || config.llmConfig;
 			} else {
 				if (!compatibility) assertNewRun(await history.entries());
@@ -160,15 +172,15 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 			const params: AgentSessionParams = compatibility ? { ...compatibility.params, signal } : {
 				messages, llmConfig, expertRoleId: config.expertRoleId, activeRoleId,
 				identityPrompt: config.identityPrompt, workRules: config.workRules, customLayers: config.customLayers,
-				locale: config.locale, switchRoleToolDef: config.switchRoleToolDef, tools: registry.getDefinitions(), signal,
+				locale: config.locale, switchRoleToolDef: config.switchRoleToolDef, tools: config.tools.map(agentToolToDefinition), signal,
 			};
 			const sessionConfig: AgentSessionConfig = compatibility?.config ?? {
 				maxIterations,
 				async onToolCall(call) {
-					try { return await executor.execute(call, { runId, nextSeq, signal, approvalDecisions }); }
+					try { return await executor.execute(call, { runId, nextSeq, signal, approvalDecisions, getHostSnapshot: config.hooks?.getHostSnapshot, expectedBinding,
+						onCommittedStateChange: after => { confirmedBinding = after; } }); }
 					catch (cause) {
-						// Executor persistence errors must remain rejected, not a false completion.
-						if (!(typeof cause === "object" && cause !== null && "category" in cause)) ledgerFailed = true;
+						ledgerFailed = true;
 						throw cause;
 					}
 				},
@@ -193,7 +205,7 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 					onPreparationError: requestContext?.guardPreparationError,
 					beforeToolBatch: compatibility ? undefined : async calls => {
 						await assertHostBoundary();
-						const ready = await approval.prepare(calls, {runId, nextSeq, signal, recordLedger, projectFacts: config.hooks?.getProjectFacts,
+						const ready = await approval.prepare(calls, {runId, nextSeq, signal, recordLedger, getHostSnapshot: config.hooks?.getHostSnapshot,
 							onPersistenceFailure: () => { ledgerFailed = true; },
 							checkpoint: async () => { await assertHostBoundary(); return boundary(); }});
 						if (ready.status === "awaiting_approval") return ready.events;
@@ -202,12 +214,12 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 						return undefined;
 					},
 					parallelTool: compatibility || !config.executor?.parallelReadOnly ? undefined : call => {
-						const annotations = registry.get(call.function.name)?.annotations;
-						return annotations?.readOnly === true && annotations.executionMode === "parallel"
-							&& call.function.name !== "undo" && call.function.name !== "redo" && call.function.name !== "restore" && call.function.name !== "switch_expert_role";
+						const annotations = registered.get(call.function.name)?.annotations;
+						return annotations?.readOnly === true && annotations.executionMode === "parallel" && call.function.name !== "switch_expert_role";
 					},
 					onToolBatch: compatibility ? undefined : async calls => {
-						try { return await executor.executeBatch(calls, {runId, nextSeq, signal, approvalDecisions}); }
+						try { return await executor.executeBatch(calls, {runId, nextSeq, signal, approvalDecisions, getHostSnapshot: config.hooks?.getHostSnapshot, expectedBinding,
+							onCommittedStateChange: after => { confirmedBinding = after; } }); }
 						catch (cause) { ledgerFailed = true; throw cause; }
 					},
 					onMessage: async (message, usage) => {
@@ -232,7 +244,7 @@ function createRuntime(config: AgentRuntimeConfig, compatibility?: Compatibility
 						}
 						if (!compatibility) {
 							if (message.role === "assistant") phase = message.toolCalls?.length ? "tools" : "settled";
-							if (message.role === "assistant") await assertProjectBoundary();
+							if (message.role === "assistant") await assertStateBoundary();
 							await boundary();
 							await saveCursor();
 						}

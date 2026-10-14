@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.0 — 2026-10-14 (unreleased)
+
+- Domain-neutral durable runtime contract: coherent host snapshots, opaque external bindings, and execution receipts separated from model results.
+- Schema 2 migration exports strict legacy converters and transactional IndexedDB backup/upgrade behavior.
+
 ## 0.8.0 — 2026-10-12 (unreleased)
 
 - Added default annotation-based approval gates, durable pending requests and `resolveApproval()` with persisted allow/deny decisions and same-run/call resume after reload.

@@ -5,10 +5,11 @@ import { InMemorySessionStore } from "../../src/store/session-store";
 import { InMemoryArtifactStore } from "../../src/store/artifact-store";
 import { InMemoryLedger } from "../../src/runtime/ledger";
 import { computeContextDigest } from "../../src/store/checkpoint";
+import { canonicalJson } from "../../src/store/json";
 import { registerLLMBackendFor } from "../../src/llm-client";
 import type { AgentRuntimeEvent } from "../../src/events";
 import type { StreamChunk } from "../../src/types";
-import type { AgentTool } from "../../src/tool-types";
+import type { DurableAgentTool } from "../../src/tool-types";
 
 async function collect(stream: AsyncGenerator<AgentRuntimeEvent>): Promise<AgentRuntimeEvent[]> {
   const events: AgentRuntimeEvent[]=[];
@@ -32,7 +33,7 @@ test("approval suspension persists pending batch and resumes same toolCallId exa
     else yield{type:"content_delta",delta:"Published safely after approval."};
     yield{type:"done",usage:{totalTokens:3}};
   });
-  const tools:AgentTool[]=[{name:"publish",description:"publish the render",parameters:{type:"object",properties:{}},annotations:{requiresApproval:true},execute:async()=>{effects++;return{success:true,message:"published"};}}];
+  const tools:DurableAgentTool[]=[{name:"publish",description:"publish the render",parameters:{type:"object",properties:{}},annotations:{requiresApproval:true},execute:async()=>{effects++;return{result:{success:true,message:"published"}};}}];
   const config:AgentRuntimeConfig={...fixture.config,tools};
   try{
     const runtime=createAgentRuntime(config);
@@ -69,7 +70,7 @@ test("denial creates a durable failure result without executing the gated tool",
     else {expect(_messages.some(message=>message.role==="tool"&&message.tool_call_id==="deny-call")).toBe(true);yield{type:"content_delta",delta:"Denied safely."};}
     yield{type:"done"};
   });
-  const config:AgentRuntimeConfig={...fixture.config,tools:[{name:"publish",description:"publish",parameters:{type:"object",properties:{}},annotations:{destructive:true},execute:async()=>{effects++;return{success:true,message:"unsafe"};}}]};
+  const config:AgentRuntimeConfig={...fixture.config,tools:[{name:"publish",description:"publish",parameters:{type:"object",properties:{}},annotations:{destructive:true},execute:async()=>{effects++;return{result:{success:true,message:"unsafe"}};}}]};
   try{
     const runtime=createAgentRuntime(config);
     const suspended=await collect(runtime.run("Publish?"));
@@ -82,12 +83,12 @@ test("denial creates a durable failure result without executing the gated tool",
   }finally{fixture.dispose();}
 });
 
-test("approval cannot resume after project revision changes",async()=>{
+test("approval cannot resume after external resource version changes",async()=>{
   let revision=4;let effects=0;
   const fixture=setup("approval-revision",async function*(_messages,request){
     if(request===1)yield{type:"tool_calls_complete",toolCalls:[sensitiveCall("revision-call")]};else yield{type:"done"};
   });
-  const config:AgentRuntimeConfig={...fixture.config,tools:[{name:"publish",description:"publish",parameters:{type:"object",properties:{}},annotations:{requiresApproval:true},execute:async()=>{effects++;return{success:true,message:"published"};}}],hooks:{getProjectFacts:()=>({projectId:"project",projectRevision:revision,digest:"facts",producedBy:"host"})}};
+  const config:AgentRuntimeConfig={...fixture.config,tools:[{name:"publish",description:"publish",parameters:{type:"object",properties:{}},annotations:{requiresApproval:true},execute:async()=>{effects++;return{result:{success:true,message:"published"}};}}],hooks:{getHostSnapshot:()=>({authoritativeContext:{text:"facts",producedBy:"host"},externalStateBinding:{scopeId:"project",version:String(revision)}})}};
   try{
     const runtime=createAgentRuntime(config);const suspended=await collect(runtime.run("Publish?"));await runtime.resolveApproval("revision-call","allow");revision++;
     await expect(collect(runtime.resume(suspended[0]!.runId))).rejects.toMatchObject({category:"tool_failure"});
@@ -97,7 +98,7 @@ test("approval cannot resume after project revision changes",async()=>{
 
 test("approval resolves once and rejects foreign, conflicting or not-pending decisions",async()=>{
   const fixture=setup("approval-identity",async function*(){yield{type:"tool_calls_complete",toolCalls:[sensitiveCall("one-call")]};yield{type:"done"};});
-  const config:AgentRuntimeConfig={...fixture.config,tools:[{name:"publish",description:"publish",parameters:{type:"object",properties:{}},annotations:{requiresApproval:true},execute:async()=>({success:true,message:"published"})}]};
+  const config:AgentRuntimeConfig={...fixture.config,tools:[{name:"publish",description:"publish",parameters:{type:"object",properties:{}},annotations:{requiresApproval:true},execute:async()=>({result:{success:true,message:"published"}})}]};
   try{
     const runtime=createAgentRuntime(config);await collect(runtime.run("approve"));
     await expect(runtime.resolveApproval("foreign-call","allow")).rejects.toMatchObject({category:"tool_failure"});
@@ -120,12 +121,12 @@ test("approval cannot authorize a later call after an earlier batch edit changes
   });
   const config: AgentRuntimeConfig = { ...fixture.config, tools: [
     { name: "edit", description: "edit", parameters: { type: "object" }, execute: async () => {
-      edits++; revision++; return { success: true, message: "edited" };
+      edits++;const before=revision++;return {result:{success:true,message:"edited"},receipt:{operationId:`edit-${edits}`,stateChange:{before:{scopeId:"project",version:String(before)},after:{scopeId:"project",version:String(revision)}}}};
     } },
     { name: "publish", description: "publish", parameters: { type: "object" }, annotations: { requiresApproval: true }, execute: async () => {
-      publications++; return { success: true, message: "published" };
+      publications++; return { result: { success: true, message: "published" } };
     } },
-  ], hooks: { getProjectFacts: () => ({ producedBy: "host", projectId: "project", projectRevision: revision, digest: "facts" }) } };
+  ], hooks: { getHostSnapshot: () => ({ authoritativeContext: { text: "facts", producedBy: "host" }, externalStateBinding: { scopeId: "project", version: String(revision) } }) } };
   try {
     const runtime = createAgentRuntime(config);
     const suspended = await collect(runtime.run("Edit and publish after review"));
@@ -146,8 +147,8 @@ test("committed approved edits replay after a crash without requiring the old pr
     yield { type: "done" };
   });
   const config: AgentRuntimeConfig = { ...fixture.config, tools: [{ name: "publish", description: "publish", parameters: { type: "object" }, annotations: { requiresApproval: true }, execute: async () => {
-    effects++; return { success: true, message: "duplicate" };
-  } }], hooks: { getProjectFacts: () => ({ producedBy: "host", projectId: "project", projectRevision: revision, digest: "facts" }) } };
+    effects++; return { result: { success: true, message: "duplicate" } };
+  } }], hooks: { getHostSnapshot: () => ({ authoritativeContext: { text: "facts", producedBy: "host" }, externalStateBinding: { scopeId: "project", version: String(revision) } }) } };
   try {
     const runtime = createAgentRuntime(config);
     const suspended = await collect(runtime.run("Publish"));
@@ -159,7 +160,12 @@ test("committed approved edits replay after a crash without requiring the old pr
     const argsDigest = computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [call] }]);
     await fixture.stores.artifactStore.put({ artifactId: "committed-result", sessionId: config.sessionId, contentType: "application/json", value: { success: true, message: "published" } });
     const records = await fixture.stores.ledger.query(runId);
-    await fixture.stores.ledger.append({ runId, seq: Math.max(...records.map(record => record.seq)) + 1, ts: 0, event: { kind: "tool_exec", toolCallId: call.id, tool: "publish", argsDigest, outcome: "success", messageDigest: "message", artifactId: "committed-result", projectRevisionBefore: 4, projectRevisionAfter: 5 } });
+    const intentSeq = Math.max(...records.map(record => record.seq)) + 1;
+    await fixture.stores.ledger.append({ runId, seq: intentSeq, ts: 0, event: { kind: "tool_intent", toolCallId: call.id, tool: "publish", argsDigest } });
+    const bytes = new TextEncoder().encode(canonicalJson("published"));
+    let hash = 0x811c9dc5;
+    for (const byte of bytes) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+    await fixture.stores.ledger.append({ runId, seq: intentSeq + 1, ts: 0, event: { kind: "tool_exec", toolCallId: call.id, tool: "publish", argsDigest, outcome: "success", messageDigest: hash.toString(16).padStart(8, "0"), artifactId: "committed-result", receipt: { stateChange: { before: { scopeId: "project", version: "4" }, after: { scopeId: "project", version: "5" } } } } });
     const resumed = await collect(createAgentRuntime(config).resume(runId));
     expect(resumed.at(-1)!.type).toBe("run_completed");
     expect(effects).toBe(1);
@@ -178,7 +184,7 @@ test.each([
     else expect(_messages.find(message => message.role === "tool")?.content).toBe(JSON.stringify({ success: false, message: "approval_denied" }));
     yield { type: "done" };
   });
-  const config: AgentRuntimeConfig = { ...fixture.config, tools: [{ name: "publish", description: "publish", parameters: { type: "object" }, annotations: { requiresApproval: true }, execute: async () => { effects++; return { success: true, message: "unsafe" }; } }] };
+  const config: AgentRuntimeConfig = { ...fixture.config, tools: [{ name: "publish", description: "publish", parameters: { type: "object" }, annotations: { requiresApproval: true }, execute: async () => { effects++; return { result: { success: true, message: "unsafe" } }; } }] };
   try {
     const runtime = createAgentRuntime(config);
     const suspended = await collect(runtime.run("Publish?"));
@@ -208,7 +214,7 @@ test("concurrent identical resolutions reconcile ledger claims and notify once",
   const ledger = new RacingLedger();
   let notifications = 0;
   const fixture = setup("approval-concurrent", async function* () { yield { type: "tool_calls_complete", toolCalls: [sensitiveCall()] }; yield { type: "done" }; });
-  const config: AgentRuntimeConfig = { ...fixture.config, ledger, approval: { preflight: () => ({ action: "suspend", reason: "Review" }), resolve: async () => { notifications++; } }, tools: [{ name: "publish", description: "publish", parameters: { type: "object" }, execute: async () => ({ success: true, message: "published" }) }] };
+  const config: AgentRuntimeConfig = { ...fixture.config, ledger, approval: { preflight: () => ({ action: "suspend", reason: "Review" }), resolve: async () => { notifications++; } }, tools: [{ name: "publish", description: "publish", parameters: { type: "object" }, execute: async () => ({ result: { success: true, message: "published" } }) }] };
   try {
     const runtime = createAgentRuntime(config);
     const suspended = await collect(runtime.run("Publish?"));
@@ -231,7 +237,7 @@ test("preflight ledger read failures reject with the original adapter exception"
     yield { type: "done" };
   });
   try {
-    const runtime = createAgentRuntime({ ...fixture.config, ledger: new BrokenReplayLedger(), tools: [{ name: "publish", description: "publish", parameters: { type: "object" }, execute: async () => { effects++; return { success: true, message: "unsafe" }; } }] });
+    const runtime = createAgentRuntime({ ...fixture.config, ledger: new BrokenReplayLedger(), tools: [{ name: "publish", description: "publish", parameters: { type: "object" }, execute: async () => { effects++; return { result: { success: true, message: "unsafe" } }; } }] });
     await expect(collect(runtime.run("Publish"))).rejects.toBe(failure);
     expect(effects).toBe(0);
     expect(runtime.state).toBe("settled");

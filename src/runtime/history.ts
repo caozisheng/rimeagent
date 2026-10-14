@@ -6,7 +6,7 @@ import type { AgentCheckpoint, AgentCheckpointRef } from "../store/checkpoint";
 import { computeContextDigest } from "../store/checkpoint";
 import { isToolResult } from "../store/validation";
 import { normalizeError } from "../errors";
-import type { ProjectFactsDigest } from "./context-manager";
+import type { ExternalStateBinding } from "../tool-types";
 
 type EntryBody = AgentSessionEntry extends infer E ? E extends AgentSessionEntry ? Omit<E, "id" | "ts"> : never : never;
 
@@ -46,7 +46,7 @@ export function assertCompleteHistory(messages: readonly AgentMessage[]): void {
 export interface HistoryBoundary {
 	runId: string;
 	seq: number;
-	projectFacts?: ProjectFactsDigest;
+	externalStateBinding?: ExternalStateBinding;
 }
 
 /** Appends confirmed messages only; lifecycle/checkpoints never enter the model projection. */
@@ -73,7 +73,7 @@ export class RuntimeHistory {
 				...(message.toolCalls === undefined ? {} : { toolCalls: message.toolCalls }) });
 		} else if (message.role === "tool") {
 			const result: unknown = JSON.parse(message.content);
-			if (!message.toolCallId || !isToolResult(result)) throw new TypeError("Initial tool messages require a serialized AgentToolResult and toolCallId");
+			if (!message.toolCallId || !isToolResult(result) || Object.hasOwn(result, "undoable")) throw new TypeError("Durable tool messages require a serialized neutral AgentToolResult and toolCallId");
 			await this.append({ kind: "tool_result", toolCallId: message.toolCallId, result,
 				...(artifactId === undefined ? {} : { artifactId }) });
 		}
@@ -108,15 +108,11 @@ export class RuntimeHistory {
 			entrySeq: snapshot?.entries.length ?? 0, contextDigest,
 			...(this.parentId === undefined ? {} : { parentId: this.parentId }),
 			...(boundary === undefined ? {} : { runId: boundary.runId, seq: boundary.seq }),
-			...(boundary?.projectFacts === undefined ? {} : {
-				projectRevision: boundary.projectFacts.projectRevision,
-				...(boundary.projectFacts.projectId === undefined ? {} : { projectId: boundary.projectFacts.projectId }),
-			}),
+			...(boundary?.externalStateBinding === undefined ? {} : { externalStateBinding: boundary.externalStateBinding }),
 			...(label === undefined ? {} : { label }) }));
 		await this.append({ kind: "checkpoint", checkpointId });
 		this.parentId = checkpointId;
 		return { checkpointId, sessionId: this.sessionId, contextDigest,
-			...(boundary?.projectFacts === undefined ? {} : { projectRevision: boundary.projectFacts.projectRevision,
-				...(boundary.projectFacts.projectId === undefined ? {} : { projectId: boundary.projectFacts.projectId }) }) };
+			...(boundary?.externalStateBinding === undefined ? {} : { externalStateBinding: boundary.externalStateBinding }) };
 	}
 }

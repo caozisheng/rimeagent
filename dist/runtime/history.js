@@ -74,8 +74,8 @@ export class RuntimeHistory {
         }
         else if (message.role === "tool") {
             const result = JSON.parse(message.content);
-            if (!message.toolCallId || !isToolResult(result))
-                throw new TypeError("Initial tool messages require a serialized AgentToolResult and toolCallId");
+            if (!message.toolCallId || !isToolResult(result) || Object.hasOwn(result, "undoable"))
+                throw new TypeError("Durable tool messages require a serialized neutral AgentToolResult and toolCallId");
             await this.append({ kind: "tool_result", toolCallId: message.toolCallId, result,
                 ...(artifactId === undefined ? {} : { artifactId }) });
         }
@@ -108,16 +108,12 @@ export class RuntimeHistory {
             entrySeq: snapshot?.entries.length ?? 0, contextDigest,
             ...(this.parentId === undefined ? {} : { parentId: this.parentId }),
             ...(boundary === undefined ? {} : { runId: boundary.runId, seq: boundary.seq }),
-            ...(boundary?.projectFacts === undefined ? {} : {
-                projectRevision: boundary.projectFacts.projectRevision,
-                ...(boundary.projectFacts.projectId === undefined ? {} : { projectId: boundary.projectFacts.projectId }),
-            }),
+            ...(boundary?.externalStateBinding === undefined ? {} : { externalStateBinding: boundary.externalStateBinding }),
             ...(label === undefined ? {} : { label }) }));
         await this.append({ kind: "checkpoint", checkpointId });
         this.parentId = checkpointId;
         return { checkpointId, sessionId: this.sessionId, contextDigest,
-            ...(boundary?.projectFacts === undefined ? {} : { projectRevision: boundary.projectFacts.projectRevision,
-                ...(boundary.projectFacts.projectId === undefined ? {} : { projectId: boundary.projectFacts.projectId }) }) };
+            ...(boundary?.externalStateBinding === undefined ? {} : { externalStateBinding: boundary.externalStateBinding }) };
     }
 }
 //# sourceMappingURL=history.js.map

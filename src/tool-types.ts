@@ -12,6 +12,14 @@ export interface AgentToolResult {
 	undoable?: boolean;
 	suggestions?: ToolSuggestion[];
 }
+/** Evidence from the host's committed operation, never inferred from result.data. */
+export interface ExternalStateBinding { readonly scopeId: string; readonly version: string }
+export interface ExecutionReceipt {
+	readonly operationId?: string;
+	readonly stateChange?: { readonly before: ExternalStateBinding; readonly after: ExternalStateBinding };
+}
+export interface DurableToolExecution { readonly result: Omit<AgentToolResult, "undoable">; readonly receipt?: ExecutionReceipt }
+
 
 export interface AgentToolAnnotations {
 	readonly readOnly?: boolean;
@@ -29,8 +37,11 @@ export interface AgentTool {
 	annotations?: AgentToolAnnotations;
 	execute: (args: Record<string, unknown>) => Promise<AgentToolResult>;
 }
+export type DurableAgentTool = Omit<AgentTool, "execute"> & {
+	execute: (args: Record<string, unknown>) => Promise<DurableToolExecution>;
+};
 
-export function agentToolToDefinition(tool: AgentTool): ToolDefinition {
+export function agentToolToDefinition(tool: Omit<AgentTool, "execute">): ToolDefinition {
 	return {
 		type: "function",
 		function: {

@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import type { AgentLLMConfig, AgentMessage, ToolDefinition } from "../types";
+import type { ExternalStateBinding } from "../tool-types";
 import type { AgentSessionStore } from "../store/session-store";
 import type { AgentArtifactStore } from "../store/artifact-store";
 import type { AgentSessionEntry } from "../store/entries";
@@ -8,7 +9,7 @@ import { isId } from "../store/validation";
 import { normalizeError } from "../errors";
 import { contextBudget, createTokenCounter, serializeContextRequest, throwIfContextAborted, validateContextConfig } from "./context-budget";
 import { chooseContextCut, loadContextHistory } from "./context-history";
-import { contextSummaryDigest, contextSystemMessages, currentProjectFacts, summarySystemMessage, validateContextSummary } from "./context-summary";
+import { contextSummaryDigest, contextSystemMessages, currentAuthoritativeContext, summarySystemMessage, validateContextSummary } from "./context-summary";
 import { prepareContextMessages } from "./context-tools";
 
 /** Model input budgeting is separate from immutable persisted conversation history. */
@@ -20,13 +21,11 @@ export interface ContextManagerConfig {
 	readonly maxToolResultTokens?: number;
 }
 
-/** Only a current host snapshot can supply authoritative project facts. */
-export interface ProjectFactsDigest {
-	readonly projectId?: string;
-	readonly projectRevision: number;
-	readonly digest: string;
-	readonly summary?: string;
-	readonly producedBy: "host";
+/** Host-produced model facts and execution state are independent snapshot fields. */
+export interface AuthoritativeContext { readonly text: string; readonly producedBy: "host" }
+export interface HostSnapshot {
+	readonly authoritativeContext?: AuthoritativeContext;
+	readonly externalStateBinding?: ExternalStateBinding;
 }
 
 export interface ContextProjection {
@@ -39,7 +38,7 @@ export interface ContextProjection {
 export interface ContextSummary {
 	readonly goal: string;
 	readonly constraints: string[];
-	readonly completedEdits: string[];
+	readonly completedWork: string[];
 	readonly decisions: string[];
 	readonly failedTools: string[];
 	readonly openQuestions: string[];
@@ -50,7 +49,7 @@ export interface ContextSummary {
 export interface SummarizeContextInput {
 	readonly previousSummary?: ContextSummary;
 	readonly messages: readonly AgentMessage[];
-	readonly projectFacts: ProjectFactsDigest;
+	readonly authoritativeContext?: AuthoritativeContext;
 	readonly signal?: AbortSignal;
 }
 
@@ -67,7 +66,7 @@ export interface ContextProjectInput {
 	readonly llmConfig: AgentLLMConfig;
 	readonly systemPrompt: string;
 	readonly tools: readonly ToolDefinition[];
-	readonly projectFacts?: ProjectFactsDigest;
+	readonly authoritativeContext?: AuthoritativeContext;
 	readonly forceCompact?: boolean;
 	readonly signal?: AbortSignal;
 }
@@ -97,7 +96,7 @@ export function createContextManager(options: ContextManagerOptions): ContextMan
 	const project = async (input: ContextProjectInput): Promise<ContextProjection> => {
 		throwIfContextAborted(input.signal);
 		const budget = getBudget(input.llmConfig);
-		const facts = currentProjectFacts(input.projectFacts);
+		const facts = currentAuthoritativeContext(input.authoritativeContext);
 		const snapshot = await options.sessionStore.load(options.sessionId);
 		throwIfContextAborted(input.signal);
 		if (snapshot && snapshot.sessionId !== options.sessionId) throw new TypeError("Context snapshot belongs to another session");
@@ -113,7 +112,7 @@ export function createContextManager(options: ContextManagerOptions): ContextMan
 		let tokensUsed = countTokens(serializeContextRequest(input.systemPrompt, messages, input.tools));
 		let compaction: AgentSessionEntry | undefined;
 		let droppedEntries = 0;
-		if (options.summarize && facts && (input.forceCompact || tokensUsed >= budget.triggerTokens)) {
+		if (options.summarize && (input.forceCompact || tokensUsed >= budget.triggerTokens)) {
 			const checkpoints = await options.sessionStore.listCheckpoints(options.sessionId);
 			throwIfContextAborted(input.signal);
 			const cut = chooseContextCut(history, checkpoints, options.sessionId);
@@ -123,7 +122,8 @@ export function createContextManager(options: ContextManagerOptions): ContextMan
 				try {
 					result = await options.summarize({
 						...(summary === undefined ? {} : { previousSummary: cloneJson(summary) }),
-						messages: cloneJson(prepared.messages.slice(0, droppedEntries)), projectFacts: cloneJson(facts),
+						messages: cloneJson(prepared.messages.slice(0, droppedEntries)),
+						...(facts === undefined ? {} : { authoritativeContext: cloneJson(facts) }),
 						...(input.signal === undefined ? {} : { signal: input.signal }),
 					});
 				} catch (cause) {
@@ -136,7 +136,7 @@ export function createContextManager(options: ContextManagerOptions): ContextMan
 				messages = [...contextSystemMessages(facts, summary), ...prepared.messages.slice(droppedEntries)];
 				tokensUsed = countTokens(serializeContextRequest(input.systemPrompt, messages, input.tools));
 				compaction = { id: nanoid(), ts: Date.now(), kind: "compaction", summary: canonicalJson(summary),
-					compactedEntryIds: history.messages.slice(0, cut).map(message => message.id), projectDigest: facts };
+					compactedEntryIds: history.messages.slice(0, cut).map(message => message.id), ...(facts === undefined ? {} : { authoritativeContext: facts }) };
 			}
 		}
 		for (const artifact of prepared.artifacts) {

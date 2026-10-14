@@ -2,14 +2,78 @@ import type { AgentMessage, ToolCall } from "../types";
 import type { AgentSessionEntry } from "../store/entries";
 import type { AgentCheckpointRef } from "../store/checkpoint";
 import type { ToolFailureRecord } from "../session";
-import type { ProjectFactsDigest } from "./context-manager";
+import type { ExternalStateBinding } from "../tool-types";
+import type { HostSnapshot } from "./context-manager";
 import type { RuntimeLedger } from "./ledger";
 import type { RuntimeHistory } from "./history";
 import type { AgentArtifactStore } from "../store/artifact-store";
 import { canonicalJson } from "../store/json";
 import { projectMessages } from "./history";
 import { computeContextDigest } from "../store/checkpoint";
+import { isExternalStateBinding, isToolResult } from "../store/validation";
+import type { AgentCheckpoint } from "../store/checkpoint";
+import type { LedgerRecord } from "./ledger";
 import { SWITCH_ROLE_TOOL_NAME } from "../service";
+
+/** A checkpoint is immutable: only committed, matching execution records can advance its binding. */
+export async function verifiedStateBinding(checkpoint: AgentCheckpoint | AgentCheckpointRef, runId: string,
+	entries: readonly AgentSessionEntry[], records: readonly LedgerRecord[], artifacts: AgentArtifactStore,
+	checkpoints?: readonly AgentCheckpoint[]): Promise<ExternalStateBinding | undefined> {
+	const runCheckpoints: readonly AgentCheckpoint[] = checkpoints?.filter(item => item.runId === runId)
+		?? ("entrySeq" in checkpoint ? [checkpoint] : []);
+	if (!runCheckpoints.length || runCheckpoints.some(item => item.sessionId !== checkpoint.sessionId || item.seq === undefined)) rejectRecovery("Missing run state provenance");
+	for (let index = 0; index < runCheckpoints.length; index++) {
+		const item = runCheckpoints[index]!;
+		if (index > 0 && item.seq! <= runCheckpoints[index - 1]!.seq!) rejectRecovery("Invalid checkpoint sequence order");
+		if ("entrySeq" in item && (item.entrySeq > entries.length || computeContextDigest(projectMessages(entries.slice(0, item.entrySeq))) !== item.contextDigest)) rejectRecovery("Earlier checkpoint digest mismatch");
+	}
+	const first = runCheckpoints[0]!;
+	let expected = first.externalStateBinding;
+	if (expected !== undefined && !isExternalStateBinding(expected)) rejectRecovery("Invalid checkpoint state binding");
+	const calls = new Map<string, ToolCall>();
+	for (const entry of entries) if (entry.kind === "assistant_message") {
+		for (const call of entry.toolCalls ?? []) {
+			if (calls.has(call.id)) rejectRecovery("Duplicate tool call id in state history");
+			calls.set(call.id, call);
+		}
+	}
+	const intents = new Set<string>();
+	let boundaryIndex = 0;
+	let previousSeq = 0;
+	for (const record of records) {
+		if (record.runId !== runId || record.seq <= previousSeq) rejectRecovery("Invalid run ledger ordering");
+		previousSeq = record.seq;
+		while (boundaryIndex < runCheckpoints.length && (runCheckpoints[boundaryIndex]!.seq ?? 0) < record.seq) {
+			const saved = runCheckpoints[boundaryIndex++]!.externalStateBinding;
+			if (saved?.scopeId !== expected?.scopeId || saved?.version !== expected?.version) rejectRecovery("Checkpoint adopted unverified state");
+		}
+		if (record.event.kind === "tool_intent") intents.add(record.event.toolCallId);
+		if (record.event.kind !== "tool_exec") continue;
+		const execution = record.event;
+		const call = calls.get(execution.toolCallId);
+		const digest = call && computeContextDigest([{ id: "digest", createdAt: 0, role: "assistant", content: "", toolCalls: [call] }]);
+		if (!call || execution.tool !== call.function.name || execution.argsDigest !== digest || !intents.has(call.id)
+			|| !execution.artifactId) rejectRecovery("Unbound committed execution in state chain");
+		const artifact = await artifacts.get(execution.artifactId);
+		if (!artifact || artifact.sessionId !== checkpoint.sessionId || artifact.contentType !== "application/json"
+			|| !isToolResult(artifact.value) || artifact.value.success !== (execution.outcome === "success")) rejectRecovery("Invalid committed execution artifact");
+		const bytes = new TextEncoder().encode(canonicalJson(artifact.value.message));
+		let hash = 0x811c9dc5;
+		for (const byte of bytes) hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+		if (hash.toString(16).padStart(8, "0") !== execution.messageDigest) rejectRecovery("Committed execution message digest mismatch");
+		const change = execution.receipt?.stateChange;
+		if (change) {
+			if (!expected || change.before.scopeId !== expected.scopeId || change.before.version !== expected.version
+				|| change.after.scopeId !== expected.scopeId) rejectRecovery("Committed execution state chain is discontinuous");
+			expected = change.after;
+		}
+	}
+	while (boundaryIndex < runCheckpoints.length) {
+		const saved = runCheckpoints[boundaryIndex++]!.externalStateBinding;
+		if (saved?.scopeId !== expected?.scopeId || saved?.version !== expected?.version) rejectRecovery("Checkpoint adopted unverified state");
+	}
+	return expected;
+}
 
 export interface ResumeState {
 	messages: AgentMessage[];
@@ -37,7 +101,7 @@ export function assertNewRun(entries: readonly AgentSessionEntry[]): void {
 
 /** Read-only preflight: nothing is appended and no model/tool is invoked on rejection. */
 export async function loadResumeState(history: RuntimeHistory, ledger: RuntimeLedger, runId: string,
-	facts: ProjectFactsDigest | undefined, artifacts: AgentArtifactStore): Promise<ResumeState> {
+	getSnapshot: (() => HostSnapshot | undefined) | undefined, artifacts: AgentArtifactStore): Promise<ResumeState> {
 	const entries = await history.entries();
 	const startIndex = entries.findIndex(entry => entry.kind === "run_started" && entry.runId === runId);
 	if (startIndex < 0) rejectRecovery("Unknown runId");
@@ -87,15 +151,9 @@ export async function loadResumeState(history: RuntimeHistory, ledger: RuntimeLe
 			if (!artifact || artifact.sessionId !== history.sessionId || canonicalJson(artifact.value) !== canonicalJson(entry.result)) rejectRecovery("Checkpoint result artifact mismatch");
 		}
 	}
-	let expectedRevision = boundary.projectRevision;
-	for (const record of records) {
-		if (record.seq <= (boundary.seq ?? 0) || record.event.kind !== "tool_exec") continue;
-		if (record.event.projectRevisionAfter !== undefined && record.event.projectRevisionBefore === expectedRevision) {
-			expectedRevision = record.event.projectRevisionAfter;
-		}
-	}
-	if (boundary.projectRevision !== undefined && (!facts || facts.projectRevision !== expectedRevision)) rejectRecovery("Checkpoint project revision mismatch");
-	if (boundary.projectId !== undefined && boundary.projectId !== facts?.projectId) rejectRecovery("Checkpoint project identity mismatch");
+	const expectedBinding = await verifiedStateBinding(boundary, runId, entries, records, artifacts, checkpoints);
+	const observed = getSnapshot?.()?.externalStateBinding;
+	if (expectedBinding?.scopeId !== observed?.scopeId || expectedBinding?.version !== observed?.version) rejectRecovery("Checkpoint external state binding mismatch");
 
 	const pending = new Map<string, ToolCall>();
 	let batch: ToolCall[] = [];
@@ -141,6 +199,5 @@ export async function loadResumeState(history: RuntimeHistory, ledger: RuntimeLe
 		seq,
 		iteration, phase, activeRoleId, pendingToolCalls: [...pending.values()], failures,
 		checkpoint: { checkpointId: boundary.checkpointId, sessionId: boundary.sessionId, contextDigest: boundary.contextDigest,
-			...(boundary.projectId === undefined ? {} : { projectId: boundary.projectId }),
-			...(expectedRevision === undefined ? {} : { projectRevision: expectedRevision }) } };
+			...(expectedBinding === undefined ? {} : { externalStateBinding: expectedBinding }) } };
 }

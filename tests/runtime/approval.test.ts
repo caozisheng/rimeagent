@@ -16,8 +16,7 @@ const context = (annotations?: ToolCallContext["annotations"]): ToolCallContext 
 		function: { name: "write_file", arguments: '{"path":"note.txt"}' },
 	},
 	annotations,
-	projectId: "project-a",
-	projectRevision: 7,
+	externalStateBinding: { scopeId: "project-a", version: "7" },
 });
 
 function digestFor(proposal: unknown): string {

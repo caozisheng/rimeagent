@@ -1,4 +1,5 @@
 import type { AgentLLMConfig, AgentMessage, ToolDefinition } from "../types";
+import type { ExternalStateBinding } from "../tool-types";
 import type { AgentSessionStore } from "../store/session-store";
 import type { AgentArtifactStore } from "../store/artifact-store";
 /** Model input budgeting is separate from immutable persisted conversation history. */
@@ -9,13 +10,14 @@ export interface ContextManagerConfig {
     readonly compactTriggerRatio?: number;
     readonly maxToolResultTokens?: number;
 }
-/** Only a current host snapshot can supply authoritative project facts. */
-export interface ProjectFactsDigest {
-    readonly projectId?: string;
-    readonly projectRevision: number;
-    readonly digest: string;
-    readonly summary?: string;
+/** Host-produced model facts and execution state are independent snapshot fields. */
+export interface AuthoritativeContext {
+    readonly text: string;
     readonly producedBy: "host";
+}
+export interface HostSnapshot {
+    readonly authoritativeContext?: AuthoritativeContext;
+    readonly externalStateBinding?: ExternalStateBinding;
 }
 export interface ContextProjection {
     readonly messages: AgentMessage[];
@@ -29,7 +31,7 @@ export interface ContextProjection {
 export interface ContextSummary {
     readonly goal: string;
     readonly constraints: string[];
-    readonly completedEdits: string[];
+    readonly completedWork: string[];
     readonly decisions: string[];
     readonly failedTools: string[];
     readonly openQuestions: string[];
@@ -39,7 +41,7 @@ export interface ContextSummary {
 export interface SummarizeContextInput {
     readonly previousSummary?: ContextSummary;
     readonly messages: readonly AgentMessage[];
-    readonly projectFacts: ProjectFactsDigest;
+    readonly authoritativeContext?: AuthoritativeContext;
     readonly signal?: AbortSignal;
 }
 export type ContextSummarizer = (input: SummarizeContextInput) => ContextSummary | Promise<ContextSummary>;
@@ -53,7 +55,7 @@ export interface ContextProjectInput {
     readonly llmConfig: AgentLLMConfig;
     readonly systemPrompt: string;
     readonly tools: readonly ToolDefinition[];
-    readonly projectFacts?: ProjectFactsDigest;
+    readonly authoritativeContext?: AuthoritativeContext;
     readonly forceCompact?: boolean;
     readonly signal?: AbortSignal;
 }

@@ -24,7 +24,7 @@ const events: LedgerRecord["event"][] = [
 	{
 		kind: "tool_exec", toolCallId: "call-2", tool: "edit", argsDigest: "args",
 		outcome: "failure", messageDigest: "message", artifactId: "artifact-1",
-		commandId: "command-1", projectRevisionBefore: 0, projectRevisionAfter: 1,
+		receipt: { operationId: "command-1", stateChange: { before: { scopeId: "resource", version: "v0" }, after: { scopeId: "resource", version: "v1" } } },
 	},
 	{ kind: "retry", attempt: 0, category: "provider" },
 	{ kind: "retry", toolCallId: "call-1", attempt: 1, category: "context_overflow" },
@@ -176,13 +176,13 @@ describe("InMemoryLedger", () => {
 		expect(await ledger.query("run-1")).toEqual([item]);
 	});
 
-	test("accepts safe integer boundaries for sequence, indexes and revisions", async () => {
+	test("accepts safe integer sequence and indexes while state versions remain opaque", async () => {
 		const ledger = new InMemoryLedger();
 		const maximum = Number.MAX_SAFE_INTEGER;
 		const items = [
 			record(1, { kind: "model_call", provider: "custom", model: "model", requestIndex: maximum, usage: {} }),
 			record(2, { kind: "retry", attempt: maximum, category: "provider" }),
-			record(maximum, { ...toolEvent("success"), projectRevisionBefore: 0, projectRevisionAfter: maximum } as LedgerRecord["event"]),
+			record(maximum, { ...toolEvent("success"), receipt: { stateChange: { before: { scopeId: "resource", version: "0" }, after: { scopeId: "resource", version: String(maximum) } } } } as LedgerRecord["event"]),
 		];
 		for (const item of items) await ledger.append(item);
 		expect(await ledger.query("run-1")).toEqual(items);
@@ -195,9 +195,9 @@ describe("InMemoryLedger", () => {
 		}
 	});
 
-	test.each(["projectRevisionBefore", "projectRevisionAfter"])("rejects invalid revision %s", async field => {
-		for (const value of [-1, 0.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "1", null]) {
-			await expect(appendUnknown(new InMemoryLedger(), { ...record(1), event: { ...toolEvent("success"), [field]: value } })).rejects.toThrow();
+	test.each(["before", "after"])("rejects malformed receipt %s binding", async field => {
+		for (const value of [null, "", 1, { scopeId: "", version: "v" }, { scopeId: "resource", version: "" }]) {
+			await expect(appendUnknown(new InMemoryLedger(), { ...record(1), event: { ...toolEvent("success"), receipt: { stateChange: { before: { scopeId: "resource", version: "v0" }, after: { scopeId: "resource", version: "v1" }, [field]: value } } } })).rejects.toThrow();
 		}
 	});
 
@@ -216,7 +216,7 @@ describe("InMemoryLedger", () => {
 			...(["provider", "model"] as const).map(field => ({
 				kind: "model_call", provider: "custom", model: "model", requestIndex: 0, usage: {}, [field]: "",
 			})),
-			...["toolCallId", "tool", "argsDigest", "messageDigest", "artifactId", "commandId"].flatMap(field => [
+			...["toolCallId", "tool", "argsDigest", "messageDigest", "artifactId"].flatMap(field => [
 				{ ...toolEvent("success"), [field]: "" }, { ...toolEvent("success"), [field]: 1 },
 			]),
 			{ ...toolEvent("success"), outcome: "pending" },

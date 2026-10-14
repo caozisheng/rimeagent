@@ -1,451 +1,296 @@
 # rimeagent
 
-Host-agnostic LLM agent engine with tool registry, streaming, and expert role orchestration.
+`rimeagent` is a host-neutral TypeScript agent runtime. It provides LLM routing, tool calling, durable approval and replay protection, append-only session history, context budgeting/compaction, and optional IndexedDB persistence. The engine does not depend on an editor, project document, React, Tauri, or DOM. A host supplies tools and, when it has externally mutable state, one coherent `HostSnapshot`.
 
-## Features
+## Install and exports
 
-- **Multi-provider LLM streaming** — OpenAI-compatible and Anthropic native, with pluggable backends
-- **Tool calling** — Registry-based tool system with typed definitions and execution
-- **Expert roles** — Orchestrator mode with dynamic role switching
-- **Skills** — Skill registry with prompt layers and tool refs
-- **MCP support** — Model Context Protocol tool provider integration
-- **Session management** — Multi-iteration agent loop with tool execution and failure recovery
-- **Durable runtime** — Injected session/artifact/ledger stores, validated resume and an optional IndexedDB adapter
-
-## Install
-
-```bash
-npm install rimeagent
-# or
-bun add rimeagent
+```sh
+# After 0.9.0 is published:
+npm install rimeagent@0.9.0
+# Until publication, consume an authorized Git commit that includes dist/ and pin its SHA.
 ```
 
-## Usage
+The source package is ESM and currently declares `0.9.0` (unreleased). An `npm install rimeagent@0.9.0` command will not provide these APIs until publication; host Git pins must refer to a built, reachable commit. The root export contains the neutral runtime, legacy loop/session entrypoints, stores, validation types, and migration converters. The optional Web adapter is `rimeagent/adapters/web`; the Vercel transport is `rimeagent/backends/vercel`. The package does not eagerly load IndexedDB or an AI SDK.
 
-```typescript
+```ts
 import {
-  ToolRegistry,
-  SkillRegistry,
-  ExpertRoleRegistry,
-  runAgentSession,
-} from "rimeagent";
-
-// Register tools
-ToolRegistry.register(myTool);
-
-// Run an agent session
-const events = runAgentSession(
-  {
-    messages,
-    llmConfig: { baseUrl, apiKey, model },
-    expertRoleId: "general",
-    tools: ToolRegistry.getDefinitions(),
-  },
-  {
-    maxIterations: 5,
-    onToolCall: async (tc) => {
-      const tool = ToolRegistry.get(tc.function.name);
-      return tool.execute(JSON.parse(tc.function.arguments));
-    },
-  },
-);
-
-for await (const event of events) {
-  // handle streaming events
-}
-```
-
-## Transport backends (0.3.0)
-
-The default `RimeAgentBackend` selects OpenAI-compatible transport or native
-Anthropic transport for `api.anthropic.com`. Third-party Claude proxies remain
-OpenAI-compatible. `runAgentLoop` and `runAgentSession` retain their existing
-contracts; durable run execution, recovery and approvals are not implemented yet.
-
-Vercel AI SDK is an optional peer, imported only through `rimeagent/backends/vercel`.
-The host supplies a model resolver and owns provider packages, credentials and
-proxy configuration. Example for an explicitly selected direct OpenAI backend:
-
-```bash
-npm install ai @ai-sdk/openai
-```
-
-```typescript
-import { createOpenAI } from "@ai-sdk/openai";
-import { registerLLMBackendFor } from "rimeagent";
-import { VercelAIBackend } from "rimeagent/backends/vercel";
-
-const unregister = registerLLMBackendFor(
-  (config) => config.provider === "openai" && config.directMode === true,
-  new VercelAIBackend((config) => createOpenAI({
-    baseURL: config.baseUrl,
-    apiKey: config.apiKey,
-  }).chat(config.model)),
-);
-
-// Call unregister() when the host removes this backend.
-```
-
-Predicates are checked newest-first, then the legacy `registerLLMBackend()` slot,
-then the built-in baseline. Registering the same predicate function twice throws;
-the new registration's disposer is idempotent. Legacy registration still uses
-last-registration-wins semantics. The Vercel adapter performs one model turn,
-without SDK retries or tool execution; caller abort and early generator closure
-cancel the provider request. System prompt layers use the SDK system channel.
-
-`normalizeError()` exports four policy categories: `provider`, `context_overflow`,
-`tool_failure`, `interrupted`. Transport error chunks retain `message` and add
-optional `error` metadata; legacy `AgentEvent` shapes are unchanged. Permanent
-quota/authentication errors are not retryable, even with a retryable HTTP status.
-`TokenUsage` adds optional `cost` (provider-reported USD), `cacheReadTokens` and
-`cacheWriteTokens`; absent data is not estimated. Vercel reads SDK cache details
-and provider metadata `cost`, `cacheWriteTokens` or `cacheCreationInputTokens`.
-JSON schemas describe tools to the model; domain argument validation remains
-with the host's tool execution layer.
-
-Migration: direct imports of `CloudLLMBackend` or `AnthropicLLMBackend` must use
-`RimeAgentBackend`; the old class names are removed, not aliased. No native
-backend or Tauri dependency is included.
-
-## Runner contracts (0.4.0)
-
-The main entry exports functional in-memory session, artifact and ledger stores,
-checkpoint/digest helpers, and versioned event/entry serialization contracts.
-The stores and serialization helpers remain available independently. Runtime
-0.6.0 uses session history, checkpoints, an execution ledger and cached artifacts
-for recovery. The legacy session wrapper keeps an isolated in-memory runtime
-and its original event and callback API.
-
-```typescript
-import {
+  createAgentRuntime,
   InMemorySessionStore,
-  createAgentRuntimeEvent,
-  parseAgentRuntimeEvent,
+  InMemoryArtifactStore,
+  InMemoryLedger,
 } from "rimeagent";
-
-const store = new InMemorySessionStore();
-await store.append("session", {
-  kind: "user_message", id: "entry-1", ts: 0, content: "Edit this clip",
-});
-
-const event = createAgentRuntimeEvent("run", 1, 0, {
-  kind: "run_started", sessionId: "session",
-});
-const decoded = parseAgentRuntimeEvent(JSON.parse(JSON.stringify(event)));
-if (decoded?.type === "run_started") {
-  console.log(decoded.payload.sessionId);
-}
 ```
 
-- `InMemorySessionStore`: `load`, `append`, `saveCheckpoint`, `listCheckpoints`.
-  Entry IDs are unique per session; returned snapshots and input records are
-  isolated. Checkpoint IDs are globally unique and immutable; boundaries cannot
-  exceed appended history. Parents must exist in the same session at an earlier
-  or equal boundary. A root checkpoint at boundary 0 can create an empty session.
-- `InMemoryArtifactStore`: `put({ artifactId, sessionId, contentType, value })`,
-  `get(artifactId)`, `list(sessionId)`. Values are strict JSON data, not media
-  bytes. Global artifact IDs cannot be overwritten.
-- `InMemoryLedger`: `append`, `query(runId)`, `hasExecuted(toolCallId)` and
-  `getToolExecution(toolCallId)`. Positive safe-integer sequences strictly increase
-  per run (gaps allowed). Global tool intent claims reject duplicate writers;
-  replay lookup prefers a successful execution, otherwise the latest intent/result.
-- `serializeAgentSessionEntry` / `parseAgentSessionEntry` validate all 18 kinds
-  and nested typed fields. Serializing live errors removes opaque `cause`;
-  parsing persisted causes or unknown kinds/fields rejects. Host code must still
-  keep secrets out of prompt/result text and arbitrary tool data.
-- `createAgentRuntimeEvent(runId, seq, ts, payload)` takes an explicit clock and
-  sequence. `parseAgentRuntimeEvent` returns `null` for unknown v2 types, throws
-  for unsupported versions or damaged known events, and supports outer `type`
-  narrowing. Event error causes are sanitized too.
-- `computeContextDigest(messages)` hashes canonical model-visible fields with
-  UTF-8 FNV-1a32; UI IDs/timestamps/results are ignored. It is not a cryptographic
-  integrity mechanism, and branching never restores a host project.
-- `AgentTool.annotations` carries read-only/destructive/idempotent/approval and
-  serial/parallel metadata without entering the LLM schema. Scheduling defaults to
-  serial; explicit approval-sensitive annotations suspend the durable runtime.
+## Backend registration
 
-The memory stores are volatile: reuse the same three instances for in-process
-resume, or inject durable stores for reload/process recovery. Runtime 0.8.0 builds
-token-budgeted projections and host-produced compaction summaries without changing
-the append-only log. Shared host storage probes live in
-`tests/contract/store-contract.ts`; the published `./contract` subpath remains a later phase.
+The runtime preserves the existing provider routing contract. Register a backend before starting a run; the predicate is matched against the same `AgentLLMConfig` object used by the runtime.
 
-## Agent runtime (0.8.0)
+```ts
+import { registerLLMBackendFor, RimeAgentBackend } from "rimeagent";
+import type { AgentLLMConfig } from "rimeagent";
 
-```typescript
-import { createAgentRuntime, InMemorySessionStore } from "rimeagent";
+const llmConfig: AgentLLMConfig = {
+  baseUrl: "https://api.openai.com/v1", // replace with your compatible API endpoint
+  apiKey: "YOUR_API_KEY", // host injects a real secret; never persist it
+  model: "YOUR_MODEL_ID", // choose a model available at that endpoint
+  provider: "openai",
+  directMode: true,
+};
+
+// The built-in backend speaks OpenAI-compatible streaming responses in direct mode.
+const unregister = registerLLMBackendFor(candidate => candidate === llmConfig, new RimeAgentBackend());
+// Call unregister() when this host's backend route is no longer needed.
+```
+
+Hosts should register one backend per routing boundary and keep credentials out of session entries, artifacts, result data, and ledger records.
+
+Default routing without registration uses `RimeAgentBackend`. `directMode: true` sends the provider-compatible stream to `baseUrl/chat/completions`; proxy mode uses the host `/api/ai/chat` route. `registerLLMBackendFor` installs a predicate-scoped override and returns an unregister function. `registerLLMBackend` sets a global override. `getLLMBackend` and `resolveProvider` expose the selected backend/provider for diagnostics. Optional `VercelAIBackend` from `rimeagent/backends/vercel` accepts a host-owned `(config) => LanguageModel | Promise<LanguageModel>` resolver (Vercel AI SDK peer dependency); the host chooses credentials/model provider. Neither adapter creates a second agent loop.
+
+## Simplest stateless host
+
+A host with no externally mutable resource does not need to invent a project or revision. Omit `getHostSnapshot`, provide a real stateless host lookup, and use memory stores for an in-process run.
+
+```ts
+import {
+  createAgentRuntime,
+  InMemorySessionStore,
+  InMemoryArtifactStore,
+  InMemoryLedger,
+} from "rimeagent";
+
+// Implement this read-only lookup using your host's real search API.
+declare function hostSearch(query: string): Promise<string[]>;
+
 
 const runtime = createAgentRuntime({
-  sessionId: "editing-session",
-  sessionStore: new InMemorySessionStore(),
-  llmConfig: { baseUrl, apiKey, model },
+  sessionId: "search-session",
   expertRoleId: "general",
-  tools: myTools,
-  maxIterations: 10,
-  hooks: {
-    buildDynamicContext: () => currentTimelineSummary(),
-  },
+  llmConfig,
+  sessionStore: new InMemorySessionStore(),
+  artifactStore: new InMemoryArtifactStore(),
+  ledger: new InMemoryLedger(),
+  tools: [{
+    name: "search",
+    description: "Search the host's index without changing state.",
+    parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    annotations: { readOnly: true, idempotent: true, executionMode: "parallel" },
+    async execute(args) {
+      if (typeof args.query !== "string") return { result: { success: false, message: "query must be a string" } };
+      const items = await hostSearch(args.query); // host-owned real lookup; inject your implementation
+      return { result: { success: true, message: `Found ${items.length} records`, data: { items } } };
+    },
+  }],
 });
 
-for await (const event of runtime.run("Trim the first clip")) {
-  if (event.type === "text_delta") console.log(event.payload.content);
-  if (event.type === "run_completed") {
-    console.log(event.payload.reason, event.payload.iterations);
+for await (const event of runtime.run("Find matching records")) {
+  console.log(event.type, event.payload);
+}
+```
+
+A missing state binding is intentional: this run does not claim to protect an external resource from concurrent changes. It can still use approval, durable history, and no-project compaction when a safe checkpoint exists.
+
+## HostSnapshot and opaque versions
+
+`HostSnapshot` is one coherent synchronous read. Its fields have independent meanings:
+
+- `authoritativeContext` is optional host-produced text for model projection.
+- `externalStateBinding` is optional execution/approval state: non-empty `scopeId` and opaque non-empty `version`.
+
+The engine never assumes the version is an integer, compares it arithmetically, or places it in model facts. These are valid host mappings:
+
+```ts
+import type { HostSnapshot } from "rimeagent";
+
+const etagSnapshot: HostSnapshot = {
+  authoritativeContext: { text: "Resource body", producedBy: "host" },
+  externalStateBinding: { scopeId: "https://example.invalid/doc", version: 'W/"etag-42"' },
+};
+const gitSnapshot: HostSnapshot = {
+  externalStateBinding: { scopeId: "repository", version: "b8820fbe88c7" },
+};
+const editorSnapshot: HostSnapshot = {
+  authoritativeContext: { text: "Current document", producedBy: "host" },
+  externalStateBinding: { scopeId: "document-id", version: String(42) },
+};
+
+// Supply one host-owned synchronous read in runtime.hooks:
+const getHostSnapshot = (): HostSnapshot => etagSnapshot;
+```
+
+Read the descriptor and authoritative text from the same host snapshot. Never construct a binding from tool result data, an old summary, a timeline label, or two separately sampled host calls.
+
+## DurableAgentTool and ExecutionReceipt
+
+New runtime tools return a durable envelope. `result` remains model-visible business output; `receipt` is execution evidence for the ledger and recovery path and is never included in the model tool result or result artifact.
+
+```ts
+import type { DurableAgentTool, ExternalStateBinding, HostSnapshot } from "rimeagent";
+
+interface CommitResponse { operationId: string; after: ExternalStateBinding }
+interface ResourceHost {
+  getSnapshot(): HostSnapshot;
+  commit(value: string, expected: ExternalStateBinding): Promise<CommitResponse>;
+}
+
+function updateTool(host: ResourceHost): DurableAgentTool {
+  return {
+    name: "update_resource",
+    description: "Commit one update to the resource.",
+    parameters: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+    annotations: { readOnly: false, idempotent: false, executionMode: "serial", requiresApproval: true },
+    async execute(args) {
+      const before = host.getSnapshot().externalStateBinding;
+      if (!before) throw new Error("A resource update requires a state binding");
+      const committed = await host.commit(String(args.value), before); // host atomically enforces expected version
+      return { result: { success: true, message: "Updated" },
+        receipt: { operationId: committed.operationId, stateChange: { before, after: committed.after } } };
+    },
+  };
+}
+```
+
+The host must return the real committed operation ID and state transition. The adapter must not guess an ID, infer before/after values by calling `describe()` twice, or copy reserved-looking business fields into a receipt. Arbitrary business JSON such as `{ commandId: 42, projectRevisionBefore: "etag" }` remains ordinary `result.data`.
+
+Old `AgentTool.execute` functions that return a bare `AgentToolResult` remain supported only at legacy `runAgentLoop`/`runAgentSession` boundaries. New durable runtime configuration uses `DurableAgentTool`; there is no public editor-shaped `ToolContext` or `ToolFactory`.
+
+## Annotations and scheduling
+
+Scheduling is capability-only. With `executor: { parallelReadOnly: true }`, only adjacent tools marked both `readOnly: true` and `executionMode: "parallel"` are grouped and run concurrently. Every other tool is serial, including tools named `undo`, `redo`, `restore`, `project.undo`, or anything else. Results retain model order and a serial tool is a strict barrier.
+
+Use `destructive` or `requiresApproval` to request approval, and `idempotent` only when the host can safely retry after an uncertain effect. Do not mark a mutating tool idempotent merely because it usually succeeds.
+
+Low-level `createToolExecutor` callers that supply a bound `getHostSnapshot` must also supply `expectedBinding` from their own validated checkpoint/ledger chain; a bound call without that expected version fails closed. Normal `createAgentRuntime` wires this validation automatically. A stateless low-level tool needs neither hook. `executeBatch` retains model result order after parallel read groups; cancellation starts no new batch.
+
+## Approval, suspension, resolution, and resume
+
+A suspended tool persists the request binding (run, call, argument digest, proposal artifact/digest, and optional external state binding), an approval ledger event, a durable run cursor, and a checkpoint before emitting `run_awaiting_approval`.
+
+```ts
+import type { AgentRuntime, AgentRuntimeEvent } from "rimeagent";
+
+async function reviewPending(runtime: AgentRuntime): Promise<void> {
+  const waiting: AgentRuntimeEvent[] = [];
+  for await (const event of runtime.run("Publish the report")) waiting.push(event);
+  const approval = waiting.find(event => event.type === "run_awaiting_approval");
+  if (!approval || approval.payload.kind !== "run_awaiting_approval") return;
+  await runtime.resolveApproval(approval.payload.toolCallId, "allow", "Reviewed by operator");
+  for await (const event of runtime.resume(approval.runId)) console.log(event.type);
+}
+```
+
+A deny decision is durable and prevents execution. Repeated identical resolution is idempotent; conflicting resolution, changed arguments, changed proposal, changed scope/version, or missing host binding is rejected. Completed cached outcomes win over a newly changed approval policy and are replayed without invoking the tool again.
+
+## Stores, schema 2, and IndexedDB migration
+
+The durable interfaces are injected independently:
+
+```ts
+import { createAgentRuntime, AGENT_STORE_SCHEMA_VERSION } from "rimeagent";
+import { createIndexedDBStores } from "rimeagent/adapters/web";
+import type { AgentLLMConfig, DurableAgentTool } from "rimeagent";
+
+async function openWebRuntime(sessionId: string, llmConfig: AgentLLMConfig, tools: DurableAgentTool[]) {
+  const stores = await createIndexedDBStores({ name: "host-agent" });
+  console.log(AGENT_STORE_SCHEMA_VERSION); // 2
+  const runtime = createAgentRuntime({ sessionId, ...stores, llmConfig, expertRoleId: "general", tools });
+  return { runtime, stores }; // Call stores.close() on teardown.
+}
+```
+
+Schema 2 keeps the existing database name and upgrades IndexedDB version 1 transactionally. Before conversion it copies original rows to `legacyBackup`; it validates store/index shape, session counts, entry/checkpoint/artifact/ledger references, checkpoint digests, proposal artifacts, tool-call/argument digests, and committed ledger metadata. Old `projectId + projectRevision` is converted only as a verified pair to `{ scopeId, version: String(projectRevision) }`. Old command/revision metadata is converted to a receipt only from committed ledger records; model-visible `result.data` is never scanned for historical receipts.
+
+Migrated old tool-result JSON, including historical `undoable` where present, is never rewritten: preserving its model projection keeps checkpoint digests stable. Only migrated records carry the explicit `legacyResult: true` storage marker; new durable entries reject UI-only metadata.
+
+Upgrade failures abort the transaction, preserving the original version-one DB. A successful upgrade retains original rows in `legacyBackup`, but an old version-one host pin **cannot open the migrated version-two DB directly**. Before switching pins, back up the host DB and pause runs/resolves. For manual rollback, use `exportLegacyIndexedDBBackup(indexedDB, name)` and `restoreLegacyIndexedDBBackup(indexedDB, migratedName, separateTargetName)` from `rimeagent/adapters/web`; point the old host pin to that separate version-one target only after verifying the restored record counts. Never write both schemas into the same DB. Unknown schema, orphan rows, digest mismatch, ambiguous active cursor, uncertain intent-only effect, cross-session reference, incomplete binding, or missing committed receipt blocks migration. Conversion does not execute tools, call the model, or resolve approvals.
+
+## Compaction and summarization
+
+`ContextSummary` uses the domain-neutral `completedWork` field. A host summarizer receives previous summary, safe-cut messages, and optional current `authoritativeContext`; it does not receive an external version token as model authority.
+
+```ts
+import { createAgentRuntime } from "rimeagent";
+import type { AgentRuntimeConfig, ContextSummary, HostSnapshot } from "rimeagent";
+
+function withCompaction(config: AgentRuntimeConfig, snapshot: () => HostSnapshot | undefined) {
+  return createAgentRuntime({ ...config,
+    context: { contextTokens: 32768, reserveOutputTokens: 4096, compactTriggerRatio: 0.8 },
+    hooks: { ...config.hooks, getHostSnapshot: snapshot,
+      summarizeContext: ({ previousSummary, messages, signal }): ContextSummary => {
+        signal?.throwIfAborted();
+        const latestRequest = messages.findLast(message => message.role === "user")?.content;
+        const goal = previousSummary?.goal ?? latestRequest;
+        if (!goal?.trim()) throw new Error("Cannot summarize without a confirmed goal");
+        return {
+          goal,
+          constraints: previousSummary?.constraints ?? [],
+          completedWork: previousSummary?.completedWork ?? [],
+          decisions: previousSummary?.decisions ?? [],
+          failedTools: previousSummary?.failedTools ?? [],
+          openQuestions: previousSummary?.openQuestions ?? [],
+          nextSteps: previousSummary?.nextSteps ?? [],
+          references: previousSummary?.references ?? [],
+        };
+      },
+    },
+  });
+}
+
+// This conservative summarizer only carries previously verified work forward.
+// A domain-specific summarizer may add work/decisions only after checking confirmed messages.
+```
+
+Compaction selects a persisted safe checkpoint, never cuts through a tool batch, appends a cumulative compaction entry, and leaves old entries inspectable. Current host text and historical summary are separate prompt layers. A missing summarizer, missing safe cut, or absent project does not cause fake facts, fabricated completed work, or silent deletion.
+
+## Recovery and fail-closed rules
+
+Intent, execution, artifact, ledger, and session-result persistence are separate commits. A successful host effect followed by an artifact/ledger fault is reported as the original persistence error and is not retried as a normal tool failure. An intent without a committed execution is uncertain: non-idempotent tools are blocked; only explicitly safe read-only/idempotent operations may retry.
+
+Recovery verifies run/session/call/argument/artifact bindings and walks receipt state changes as a continuous `before → after` chain with one scope. A version change without a matching receipt cannot be adopted by a new checkpoint. A missing snapshot hook for a bound run, wrong scope/version, corrupt artifact, cross-run ledger record, discontinuous chain, or altered checkpoint digest fails closed. A receipt is evidence, not an exactly-once guarantee; hosts still need command-log/idempotency protection for a crash between host commit and ledger commit.
+
+## Web adapter requirements
+
+`rimeagent/adapters/web` requires a browser `indexedDB`, `Promise.withResolvers`, and `Array.findLast`. Adapter methods resolve only after IndexedDB transaction commit and reject blocked opens, quota errors, schema errors, and transaction aborts. Call `stores.close()` on teardown. Do not mix Web/Tauri storage paths or write old and new schemas concurrently.
+
+## Legacy loop/session boundary
+
+`runAgentLoop` and `runAgentSession` retain their established callback signatures, bare `AgentToolResult` execution, event v2 behavior, backend routing, and compatibility semantics. Legacy UI fields such as `undoable` and `commandCheckpoint` may remain at that explicit compatibility or host-display boundary. They are not written into new durable result envelopes, receipts, checkpoints, or core context summaries.
+
+## Errors and events
+
+Runtime events are versioned (`AGENT_RUNTIME_EVENT_VERSION`) and carry run IDs and monotonic sequence numbers. `run_awaiting_approval`, `run_completed`, `run_failed`, and `run_interrupted` distinguish policy suspension, successful completion, provider/tool/persistence failure, and cancellation. Persistence faults are not disguised as ordinary tool failures. Use `normalizeError` for errors crossing a host boundary and `parseAgentRuntimeEvent` for untrusted serialized events.
+```ts
+import type { AgentRuntime } from "rimeagent";
+
+async function runWithCancellation(runtime: AgentRuntime, userText: string, signal: AbortSignal) {
+  try {
+    for await (const event of runtime.run(userText, signal)) {
+      if (event.type === "run_failed") console.error(event.payload.error.message);
+      if (event.type === "run_awaiting_approval") console.log("Approval pending", event.payload.toolCallId);
+      if (event.type === "run_interrupted") console.log("Interrupted", event.payload.cause);
+      if (event.type === "run_completed") console.log("Completed", event.payload.reason);
+    }
+  } catch (error) {
+    // Storage and uncertain-effect faults reject rather than masquerade as tool failures.
+    console.error("Durable run rejected", error);
+    throw error;
   }
 }
-
-const checkpoint = await runtime.checkpoint("after trim");
 ```
 
-Each run has an independent ID. Events, checkpoints and ledger records share
-an increasing per-run sequence, so event sequences can have gaps. Resume retains
-the original runId and continues beyond every persisted sequence. The same runtime
-instance rejects overlapping runs. `state` exposes idle/running/interrupted/settled;
-`abort(reason?)`, a caller AbortSignal, or closing the generator interrupts the
-run. An already-started host tool cannot be forcibly stopped: the runtime waits
-for its result, records it, then stops without starting the next tool or request.
-Providers must honor the supplied AbortSignal, and host tools must eventually
-settle. Keep consuming or close the generator to let lifecycle cleanup finish.
 
-Confirmed history and run terminal entries are written to the injected store;
-each completed iteration receives a checkpoint. Write failures reject the
-caller. `run_completed` reports `reason: "response" | "max_iterations"` and
-`iterations`, including zero when no iterations are requested. `checkpoint(label?)`
-records optional label metadata without altering the context digest.
+## Verification
 
-`initialMessages` can seed an empty session; tool messages must contain serialized
-`AgentToolResult` JSON plus a toolCallId. Existing history wins on later runs.
-Prompt, locale, initial active role and role-switch tool definition are supported.
-Hooks provide dynamic/RAG/error-recovery context and optional model changes on
-role switching. `runAgentLoop()` remains the unchanged single-turn API.
+From the rimeagent repository root:
 
-An unfinished run must be continued with `resume(runId, signal?)`, not another
-`run()`. Invalid, stale, completed or failed runs reject without durable writes or
-model/tool calls. Resume verifies the checkpoint projection and, when bound, host
-project identity/revision. Completed ledger revisions can account for a tool
-committed immediately after the last checkpoint; unrelated host changes reject.
-Partial model text is not confirmed history and is requested again. A confirmed
-pending batch retains its original tool call IDs; a confirmed final response
-settles without another provider request. Credentials and full model config are
-not persisted; `onRoleSwitch` resolves the restored role's model configuration.
-Fresh runs reset the configured initial role/model; only resume restores that
-run's saved role override.
-New runtime tools marked `destructive` or `requiresApproval` suspend before any
-call in that model batch executes. Legacy `requiresConfirmation` remains refused;
-migrate durable tools to annotations. The existing session callback policy is untouched.
-
-### Durable approval and proposals
-
-The default `createDefaultApprovalGate()` allows ordinary/read-only tools and
-suspends explicitly destructive/approval-required calls. Handle
-`run_awaiting_approval`, persist its `runId`, and display the pending call. Reopen
-the same session/artifact/ledger stores after reload, then:
-
-```typescript
-await runtime.resolveApproval(toolCallId, "allow", "Reviewed by user"); // or "deny"
-for await (const event of runtime.resume(runId)) handleEvent(event);
-```
-
-Resolution is persisted before the optional gate notification. Repeated identical
-decisions are idempotent; conflicting, foreign, terminal or already-consumed calls
-reject. Denial creates a durable failed tool result without invoking the tool.
-Resume keeps the same run/call IDs and executes through ledger replay protection.
-Approval binds arguments, run/session, project identity/revision and proposal.
-Bindings are rechecked before dispatch: even an earlier edit in the same batch
-can invalidate a later approval. A stale plan fails rather than editing a changed project.
-Matching committed results replay without another policy decision or host effect,
-even if the original approval revision or current gate policy has changed.
-
-For custom host previews, supply `approval.preflight(context)` returning
-`{ action: "suspend", reason, proposal, proposalDigest: computeProposalDigest(proposal) }`.
-The proposal must be strict JSON. Its canonical digest is verified before storage;
-`proposal` events carry only `toolCallId`, `proposalDigest` and `artifactId`.
-Read the immutable preview with `artifactStore.get(artifactId)`; no preview means
-no proposal event. Digests use FNV-1a32, not cryptographic authentication.
-
-### Scheduling and host tool annotations
-
-Set `executor: { parallelReadOnly: true }` to overlap adjacent calls whose tools
-explicitly declare `readOnly: true, executionMode: "parallel"`. Results stay in
-model order even when reads finish out of order. Every write, role switch and
-`undo`/`redo`/`restore` is a serial barrier. Started reads all settle before the
-next write; cancellation starts no later batch. Default scheduling remains serial.
-
-RimeCut's tool registry migration belongs to the host repository. Annotate every
-registered domain tool with explicit `readOnly`, `destructive`, `idempotent`,
-`requiresApproval`, and `executionMode`; use the classification table in
-[design §5.5](docs/rimeagent-design.md#55-tool-annotations-与执行策略对-g5-部分).
-Run `assertToolAnnotationContract(tools)` from
-`tests/contract/tool-annotation-contract.ts` against the assembled registry. It
-rejects missing policies, duplicate names, parallel writes and contradictory
-destructive reads without executing tools. The npm `./contract` export is Phase 7,
-not part of this version; pin/copy the repository helper until that cutover.
-
-## Durable Web stores and recovery
-
-```typescript
-import { createAgentRuntime } from "rimeagent";
-import { createIndexedDBStores } from "rimeagent/adapters/web";
-
-const stores = await createIndexedDBStores({ name: "editor-agent" });
-const runtime = createAgentRuntime({
-  sessionId, sessionStore: stores.sessionStore,
-  artifactStore: stores.artifactStore, ledger: stores.ledger,
-  llmConfig, expertRoleId: "general", tools: myTools,
-  hooks: {
-    getProjectFacts: () => ({
-      producedBy: "host", projectId: currentProjectId(),
-      projectRevision: currentProjectRevision(), digest: currentProjectDigest(),
-    }),
-  },
-});
-
-// Persist the runId received from run_started in the host's session UI state.
-for await (const event of runtime.resume(savedRunId)) handleEvent(event);
-stores.close();
-```
-
-Reopen the same database and session after reload and inject **all three stores**.
-Missing IndexedDB, blocked opens, schema errors, transaction aborts and quota
-failures reject; there is no automatic in-memory fallback. Writes resolve only
-after transaction commit. The root import does not load the IndexedDB adapter or
-AI SDK. The runtime uses `Array.findLast`; the Web adapter also requires
-`Promise.withResolvers` on its platform.
-Model-call accounting commits before confirmed assistant history, so a restart
-after confirmation cannot discard reported usage. Missing provider usage remains
-unknown rather than being reported as zero consumption.
-
-`createToolExecutor({sessionId, tools, ledger, artifactStore, approval?, executor?})`
-is available for hosts needing the same durable execution policy. Its `preflight`,
-`execute`, and `executeBatch` share `{runId, nextSeq, signal?, projectFacts?, approvalDecisions?}`;
-`nextSeq` must be shared with the host's run ledger. Low-level suspension rejects
-before effects; the runtime owns durable suspension/resolution. Supply only
-runtime-validated durable `approvalDecisions`, never unchecked UI decisions.
-Catch `ApprovalRequiredError` to inspect its `toolCall` and suspend `decision`.
-Optional context `onPersistenceFailure` marks preflight adapter faults; the original
-adapter exception still rejects, distinct from policy allow/deny/suspend outcomes.
-Execution commits an intent before calling the host, then an immutable result
-artifact, then a `tool_exec` record, then the runtime's session result. Completed
-successes **and failures** replay their cached result without invoking the tool.
-Ledger records contain digests, not raw arguments/results. Optional
-`data.commandId`, `data.projectRevisionBefore` and `data.projectRevisionAfter`
-link the result to the host command log.
-
-An intent without a completed execution means the external effect is uncertain.
-Non-idempotent calls fail explicitly rather than execute again. Read-only or
-host-proven idempotent calls can retry and record that retry. A losing concurrent
-intent writer rejects. These rules prevent blind duplicate edits; they are not
-an exactly-once guarantee across a process crash between a host side effect and
-its durable result. The host must implement commandId idempotency/atomic commit
-for that window. Do not label a mutating tool idempotent without that guarantee.
-
-SQLite/file adapter requirements and the shared contract runner are documented
-in [design appendix E](docs/rimeagent-design.md#附录-e宿主-sqlitefile-适配与共用契约验证).
-
-## Context budgets, compaction and overflow recovery
-
-New runtime requests use `ContextManager` by default. Configure `context` to
-override token counting, window size, output reserve, compaction threshold and
-large-result limits:
-
-```typescript
-const runtime = createAgentRuntime({
-  sessionId, ...stores, llmConfig, expertRoleId: "general", tools: myTools,
-  context: {
-    contextTokens: 32768,
-    reserveOutputTokens: 4096,
-    compactTriggerRatio: 0.80,
-    maxToolResultTokens: 2048,
-    tokenizer: countTokens, // optional; default ceil(text.length / 4)
-  },
-  hooks: {
-    getProjectFacts: () => currentHostProjectFacts(),
-    summarizeContext: async ({ previousSummary, messages, projectFacts, signal }) => {
-      // Host implementation: preserve intent and references from messages and
-      // previousSummary. Return ContextSummary with every field below.
-      return await summarizeConversation({ previousSummary, messages, projectFacts, signal });
-    },
-    filterTools: (_tools, { activeRoleId }) => activeSkillToolRefs(activeRoleId),
-    buildRagContext: () => currentRetrievalContext(),
-  },
-});
-```
-
-`ContextSummary` requires `goal` (nonempty string) and string arrays
-`constraints`, `completedEdits`, `decisions`, `failedTools`, `openQuestions`,
-`nextSteps`, `references`. The summarizer belongs to the host; no built-in fake
-summary or hidden model call exists. Missing summarizer/current host facts/safe
-checkpoint means no compaction and no silent history deletion. Invalid summaries
-reject before compaction append. Signals must be honored by host async hooks.
-
-The default window is `llmConfig.contextLength ?? 32768`; the default output
-reserve is `min(4096, floor(window / 2))`. A request's effective output cap is
-`llmConfig.maxOutputTokens ?? reserveOutputTokens`; the runtime forwards it to
-the selected backend without changing backend predicate selection or mutating
-the original config. Tokens include system/context text, model-visible messages
-and tool schemas; an injected tokenizer must return nonnegative safe integers.
-Token estimates are not a provider billing guarantee.
-The runtime's final gate counts the prepared backend messages and filtered tool
-schemas, including the merged system layers, rather than trusting a pre-merge
-projection estimate alone.
-
-Compaction chooses a persisted checkpoint whose prefix has complete tool turns,
-keeps the latest user request and recent complete/pending tool batches, and
-appends a compaction entry with cumulative source IDs. Older history remains
-inspectable. Historical summaries and latest authoritative project facts are
-separate prompt layers, inserted before dynamic application context. Checkpoint
-digests still validate raw confirmed history, not changing projections or facts.
-Project identity/revision are rechecked after async preparation and before
-confirming a model response. A project change during streaming cannot be adopted
-as a new checkpoint and then used to execute a plan made for the old project;
-reported model usage is still recorded for that rejected plan.
-
-Large tool results retain their original JSON in an immutable artifact; projected
-tool messages contain bounded `success`, `message`, `artifactId` and the same
-toolCallId. Existing execution cache artifacts are reused. Missing/corrupt caches
-reject rather than silently reexecute tools. `createContextManager({sessionId,
-sessionStore, artifactStore, config?, summarize?})` also exposes
-`project({llmConfig, systemPrompt, tools, projectFacts?, forceCompact?, signal?})`,
-`countTokens(text)` and `getBudget(llmConfig)` independently of the runtime.
-
-Only normalized `context_overflow` triggers recovery. At the same iteration the
-runtime attempts forced compaction, halves the effective output cap, then filters
-tool definitions by `hooks.filterTools`' returned registered tool names. Hosts
-can derive this allowlist from active skills' `toolRefs`; an empty list removes
-all tools, including the role-switch tool. A missing hook leaves tools unchanged.
-There are at most three recovery attempts. Failed partial responses do not enter
-confirmed history and their tool calls are not executed. RAG/dynamic/error context
-is rebuilt before each attempt and after compaction. Storage failures propagate
-with the original exception on every attempt, including the last; ordinary
-provider errors do not acquire automatic retries.
-
-Exhausted overflow emits `error` and `run_interrupted` with cause
-`context_overflow`, saves recovery state, and leaves the same run resumable after
-the host adjusts context/model/hooks. It does not append `run_failed` or add a
-second user message on resume. Legacy `runAgentLoop`/`runAgentSession` retain their
-original event/projection policy rather than silently enabling compaction.
-
-## Development
-
-```bash
-bun install
+```sh
 bun test
 bun run typecheck
 npm run build
+bun run build:core
 ```
 
-Tests have a separate no-emit TypeScript configuration to keep the package's
-`dist/` layout unchanged. Full development builds include the optional Vercel
-adapter and need the SDK development dependency. `npm run build:core` builds the
-main entry without `ai`; consumers can import the package root without that peer.
-Git-pinned releases must include the rebuilt `dist/` directory.
+The complete acceptance surface includes stateless/no-project compaction, opaque ETag/SHA versions, receipt/result namespace separation, annotation-only scheduling, approval suspension and cached replay, strict continuous state chains, uncertain-effect blocking, transactional schema-2 migration with backup/rollback, and legacy loop/session compatibility. Host integration must additionally exercise real Web/Tauri persistence, command expected-version checks, HTTP/SSE transport, refresh/resume, and UI approval behavior.
 
+## License and provenance
 
-## Used by
-
-- [RimeCut](https://github.com/nicepkg/rimecut) — AI-native video editor
-- [RimeCraft](https://github.com/caozisheng/rimecraft) — Agentic chat-style game craft
-
-## License
-
-MIT
+This project is released under the MIT License; see [LICENSE](LICENSE). The engine's design history and domain-neutral migration specification are maintained in [docs/rimeagent-design.md](docs/rimeagent-design.md). Editor/project-specific adapters belong in the host repository.

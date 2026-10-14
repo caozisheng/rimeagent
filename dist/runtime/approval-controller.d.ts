@@ -4,7 +4,7 @@ import type { AgentSessionStore } from "../store/session-store";
 import type { AgentArtifactStore } from "../store/artifact-store";
 import type { RuntimeLedger, LedgerRecord } from "./ledger";
 import type { RuntimeHistory } from "./history";
-import type { ProjectFactsDigest } from "./context-manager";
+import type { HostSnapshot } from "./context-manager";
 import type { ApprovalGate } from "./approval";
 import type { ToolExecutor, ToolExecutorContext } from "./executor";
 export interface RuntimeApprovalOptions {
@@ -15,7 +15,7 @@ export interface RuntimeApprovalOptions {
     history: RuntimeHistory;
     executor: ToolExecutor;
     gate: ApprovalGate;
-    facts?: () => ProjectFactsDigest;
+    getHostSnapshot?: () => HostSnapshot | undefined;
     onPersistenceFailure: () => void;
 }
 export interface ApprovalBatchContext extends ToolExecutorContext {

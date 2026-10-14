@@ -5,6 +5,8 @@ import { isCheckpoint } from "../store/session-store";
 import { isId } from "../store/validation";
 import { openDatabase, request } from "./indexeddb-database";
 import { IndexedDBLedger } from "./indexeddb-ledger";
+export { exportLegacyIndexedDBBackup, restoreLegacyIndexedDBBackup } from "./indexeddb-database";
+export { AGENT_STORE_SCHEMA_VERSION } from "../store/schema-migration";
 class IndexedDBSessionStore {
     handle;
     constructor(handle) {

@@ -57,12 +57,12 @@ export async function runStoreContract(factory: StoreContractFactory): Promise<s
     await store.saveCheckpoint(checkpoint());
     equal(await store.load("s"), {sessionId:"s",entries:[]}, "root boundary zero establishes empty session");
     await store.append("s", user("u"));
-    await store.saveCheckpoint(checkpoint({checkpointId:"child",parentId:"root",entrySeq:1,runId:"run",seq:9,projectId:"project",projectRevision:3}));
+    await store.saveCheckpoint(checkpoint({checkpointId:"child",parentId:"root",entrySeq:1,runId:"run",seq:9,externalStateBinding:{scopeId:"project",version:"3"}}));
     await rejects(() => store.saveCheckpoint(checkpoint({checkpointId:"past",parentId:"child",entrySeq:0})));
     await rejects(() => store.saveCheckpoint(checkpoint({checkpointId:"cross",sessionId:"other",parentId:"root"})));
     await rejects(() => store.saveCheckpoint(checkpoint({sessionId:"other"})));
     equal(await store.load("other"), null, "invalid ancestry/duplicate cannot create another session");
-    equal((await store.listCheckpoints("s")).map(cp=>[cp.checkpointId,cp.entrySeq,cp.projectRevision]), [["root",0,null],["child",1,3]], "immutable checkpoint order and recovery binding");
+    equal((await store.listCheckpoints("s")).map(cp=>[cp.checkpointId,cp.entrySeq,cp.externalStateBinding?.version ?? null]), [["root",0,null],["child",1,"3"]], "immutable checkpoint order and recovery binding");
   });
   await probe("artifact immutability", async ({artifactStore: store}) => {
     const input = {artifactId:"artifact",sessionId:"s",contentType:"application/json",value:{result:{success:true}}};
@@ -82,7 +82,7 @@ export async function runStoreContract(factory: StoreContractFactory): Promise<s
     equal(await store.query("other"), [], "duplicate intent rolls back other run");
     assert(!(await store.hasExecuted("call")), "intent alone is not successful execution");
     equal(await store.getToolExecution("call"), intent, "intent is visible to uncertain-effect protection");
-    const execution = record(8,{kind:"tool_exec",toolCallId:"call",tool:"edit",argsDigest:"args",outcome:"success",messageDigest:"message",artifactId:"artifact",commandId:"command",projectRevisionBefore:3,projectRevisionAfter:4});
+    const execution = record(8,{kind:"tool_exec",toolCallId:"call",tool:"edit",argsDigest:"args",outcome:"success",messageDigest:"message",artifactId:"artifact",receipt:{operationId:"command",stateChange:{before:{scopeId:"project",version:"3"},after:{scopeId:"project",version:"4"}}}});
     await store.append(execution);
     assert(await store.hasExecuted("call"), "committed success marks global execution");
     equal(await store.getToolExecution("call"), execution, "replay query returns artifact/command binding");
